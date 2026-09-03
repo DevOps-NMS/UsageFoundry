@@ -666,6 +666,11 @@ export type QuestionSettlement =
  * model reads — and the model then answers about the questions that did survive
  * as though those were all it asked.
  *
+ * **The refusal may not tell the operator to reload.** The drafts are `useState`
+ * local to the question card, so a reload is precisely what destroys the four
+ * answers that were fine. It names what survives instead, which is true because
+ * this decides before anything is written.
+ *
  * **Every open question is in `entries`, answered or not.** A question left out
  * is indistinguishable from one that was never asked, and the model's next move
  * is to ask it again — a second turn and a second ten-minute window for
@@ -688,8 +693,9 @@ export function settleQuestions(
       return {
         ok: false,
         reason:
-          "That question is no longer waiting for an answer — it was answered " +
-          "or the conversation moved past it. Reload the chat.",
+          "One of these is no longer waiting for an answer — it was answered " +
+          "or the conversation moved past it — so nothing was sent. Your " +
+          "other answers are still here; press Answer again.",
       };
     }
     if (byId.has(id)) {
@@ -1813,6 +1819,7 @@ const CANCELLED_REASON =
   "You stopped this message while it was being answered.";
 const TIMED_OUT_REASON =
   `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`;
+/** `reconcileChatsOnBoot`'s, hoisted so the row and the thread cannot drift. */
 const RESTARTED_REASON =
   "The server restarted while this message was being answered.";
 
@@ -2640,21 +2647,24 @@ function finishTurn(chatId: string, turnSeq: number, r: TurnResult): void {
  * unfindable: `status='thinking'` is the only mark a stranded turn carries.
  */
 export function reconcileChatsOnBoot(): void {
+  // Safe as two statements where nothing else is: better-sqlite3 is
+  // synchronous, and on boot nothing in this process has claimed a turn yet.
   const stranded = db()
     .prepare("SELECT id FROM chat_sessions WHERE status='thinking'")
-    .all() as { id: string }[];
+    .all() as Array<Pick<ChatRow, "id">>;
   db()
     .prepare(
       "UPDATE chat_sessions SET status='failed', turn_started_at=NULL," +
         " error=? WHERE status='thinking'",
     )
     .run(RESTARTED_REASON);
-  // In the thread as well as on the row, for `endTurn`'s reason and one this
-  // path has of its own: `claimTurn` writes `error=NULL` in the same statement
-  // that takes the next turn, so the row's copy is gone the moment the operator
-  // retries, and without this the conversation reads as their question followed
-  // by their next one with nothing in between — an answer that never came
-  // rather than a turn the restart killed.
+  // In the thread as well as on the row, for `endTurn`'s reason and hardest
+  // here of the four endings: `claimTurn` clears `error` on the next message,
+  // so the row is the only trace of a turn lost to a restart and the
+  // operator's attempt to recover from it — the first thing they do — is what
+  // erases it. Without this the conversation reads afterwards as their question
+  // followed by their next one with nothing in between, which is an answer that
+  // never came rather than a turn the restart killed.
   for (const { id } of stranded) appendMessage(id, "system", RESTARTED_REASON);
 }
 
@@ -2746,6 +2756,10 @@ function systemPrompt(): string {
     "as an agent, and naming one changes nothing about what you may do.",
     "",
     "Asking the operator:",
+    "- When you do ask, it is `ask_operator`: it records the questions, ends",
+    "  your turn, and the operator's next message is the answer. Read its",
+    "  description before you use it — the judgement about what is worth asking",
+    "  is in there.",
     "- Ask only for what only they know: which of two designs they want, what",
     "  an ambiguous word meant, whether something they own is in scope.",
     "  Anything in the repository, in `git log`, in the issues or in a template",

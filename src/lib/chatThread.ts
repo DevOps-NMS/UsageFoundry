@@ -70,3 +70,29 @@ export function threadItems(
   }
   return items;
 }
+
+/**
+ * The instant the turn in flight began, which is what its clock counts from.
+ *
+ * Pure and unit-tested on `threadItems`' grounds: every way of getting it wrong
+ * draws a *duration* rather than an error — plausible, wrong, and on the one
+ * line of the page an operator uses to decide whether to keep waiting or press
+ * Stop and lose what the child has done. `turnStartedAt` is what `claimTurn`
+ * wrote and what `staleTurn` measures the ten-minute deadline against, so
+ * reading anything else here puts the elapsed time and the ceiling beside it on
+ * two different turns. The thread was that anything else: a turn writes into it
+ * — `save_template` appends a note mid-turn — and each write restarted the
+ * clock at zero.
+ *
+ * `lastWrite` is `staleTurn`'s own fallback (`chat.ts:1671`) and is here for
+ * its reason: a row claimed before the column existed carries no start instant,
+ * and the last thing written to the thread is the nearest thing to one. Null
+ * when there is neither, so the caller decides what to draw with no start
+ * rather than being handed a zero that renders as the age of the epoch.
+ */
+export function turnStartInstant(
+  turnStartedAt: number | null | undefined,
+  lastWrite: number | null | undefined,
+): number | null {
+  return turnStartedAt ?? lastWrite ?? null;
+}

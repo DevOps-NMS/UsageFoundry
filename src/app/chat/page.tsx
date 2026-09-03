@@ -13,7 +13,7 @@ import type {
   ProposedBlockDTO,
 } from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
-import { threadItems } from "@/lib/chatThread";
+import { threadItems, turnStartInstant } from "@/lib/chatThread";
 import {
   describeAmbientAgents,
   fmtDateTime,
@@ -147,6 +147,30 @@ const GUARD_TONE: Record<"missing" | "set", string> = {
 };
 
 /**
+ * The refusals the card already states, so `Select all` can agree to what will
+ * happen rather than to what is on screen.
+ *
+ * These are exactly the three facts `Proposal` draws in `text-danger` with the
+ * words "will be refused" — a deleted template, an agent that is gone or has
+ * decayed, and a graph that could not be read — and each is the client-visible
+ * half of a refusal the approve route already makes: `planProposal` refuses the
+ * first two by name and `planWorkflowProposal` the third, which is what leaves
+ * `blocks` empty in the first place. A card saying approval will be refused and
+ * a selection that includes it is the page contradicting itself, and the count
+ * the operator agrees to is the one that goes wrong.
+ *
+ * Deliberately **not** the whole refusal set. The rest of it is a folder on
+ * disk, an install-wide ceiling and the live dependency graph, none of which
+ * this page can see; guessing at those would skip a proposal that would have
+ * started. Under-selecting costs one tick, over-selecting is the defect.
+ */
+function approvalRefused(proposal: ChatProposalDTO): boolean {
+  return proposal.kind === "workflow"
+    ? proposal.blocks.length === 0
+    : proposal.guardsSource === "missing" || proposal.agentMissing;
+}
+
+/**
  * The leading edge of a question card, per state. Complete class strings, the
  * kit's rule — an interpolated one emits nothing at all and does it silently.
  *
@@ -159,6 +183,28 @@ const GUARD_TONE: Record<"missing" | "set", string> = {
 const QUESTION_EDGE: Record<"open" | "settled", string> = {
   open: "border-l-accent",
   settled: "border-l-line-strong",
+};
+
+/**
+ * A `system` turn's edge and text, per kind. Complete class strings, as above.
+ *
+ * `Message`'s docblock argues that what the app did must not be drawn as though
+ * the model said it; the same argument separates what the app *did* from what
+ * went *wrong*. "The chat saved a new template" and "the chat did not answer
+ * within 10 minutes and was stopped" are the same grey today, and only one of
+ * them is something to act on.
+ *
+ * **The page infers which is which, because the row does not say.**
+ * `chat_messages` carries no kind, so a failure is "the last message of a
+ * `failed` chat, saying what the row's `error` says" — right about the ending
+ * being looked at now, and wrong about the ones behind it: `claimTurn` clears
+ * both on the next message, so an older failure in a thread that was re-sent
+ * reverts to grey. The durable answer is a column on the table, which is a
+ * migration for a tone.
+ */
+const SYSTEM_EDGE: Record<"note" | "failure", string> = {
+  note: "border-l-line-strong text-ink-muted",
+  failure: "border-l-danger text-ink",
 };
 
 /**
@@ -670,7 +716,17 @@ export default function ChatPage() {
   const proposals = chat?.proposals ?? [];
   const pending = proposals.filter((p) => p.status === "pending");
   const decided = proposals.filter((p) => p.status !== "pending");
-  const allSelected = pending.length > 0 && selected.size === pending.length;
+  // What `Select all` may tick, and what it left behind. Every id it does not
+  // tick is one the route drops anyway, so this only aligns the number agreed
+  // to with the number that happens — seeded at 26 pending, the button read
+  // `Approve 26` above a sentence about 26 unattended runs when two of them
+  // could never start. `every` rather than a size comparison because the two
+  // sets are no longer the same size: with a refused proposal ticked by hand,
+  // the button still has to offer Select none.
+  const approvable = pending.filter((p) => !approvalRefused(p));
+  const refusedCount = pending.length - approvable.length;
+  const allSelected =
+    approvable.length > 0 && approvable.every((p) => selected.has(p.id));
   const showJump = !atBottom && messageCount > 0;
 
   // Proposals is always offered, empty or not: it is what the panel is for, and
@@ -702,8 +758,31 @@ export default function ChatPage() {
     chat?.status === "failed" && chat.error && chat.error !== lastMessage?.text
       ? chat.error
       : null;
-  // The turn started when the message it is answering was written.
-  const waitingSince = lastMessage?.ts ?? chat?.updatedAt ?? Date.now();
+  // Which message in the thread is the failure note — see `SYSTEM_EDGE` for
+  // what this inference is right and wrong about. Paired with `turnFailure`
+  // above on the same comparison, so exactly one of the two draws the ending:
+  // the note when the thread carries it, the belt when only the row does.
+  const failureMessageId =
+    chat?.status === "failed" &&
+    lastMessage?.role === "system" &&
+    lastMessage.text === chat.error
+      ? lastMessage.id
+      : null;
+  // The words the failed turn was answering, offered back to the composer. They
+  // are still in the thread; what is gone is the turn. `at(-1)` over a filter
+  // rather than `findLast`, which is ES2023 and this target is ES2022.
+  const lastUserMessage =
+    chat?.messages.filter((m) => m.role === "user").at(-1) ?? null;
+  // The turn started when the server claimed it, not when the thread last
+  // moved — see `turnStartInstant`. `Date.now()` is the last resort for a
+  // render with no chat at all, which is a render with nothing to draw a clock
+  // beside; it reads as "just now" rather than as 1970.
+  const waitingSince =
+    turnStartInstant(chat?.turnStartedAt, lastMessage?.ts ?? chat?.updatedAt) ??
+    Date.now();
+  // `thinking` implies a chat, but nothing here narrows the optional, and a
+  // ceiling nobody sent is one the page must not state.
+  const turnLimitMs = chat?.turnTimeoutMs ?? null;
 
   // What the click does, counted, above the button that does it. "Approve"
   // alone is a word; this is the sentence a person needs before pressing it.
@@ -774,10 +853,41 @@ export default function ChatPage() {
       <div className="flex flex-col lg:absolute lg:inset-0">
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
+          {/* Beside the heading rather than under it, and not because it
+              matters less. This row's height is already the New chat button's,
+              so up to two lines of it are free; the same two lines below the
+              heading came straight off the row underneath, which is the one
+              holding the list of things to approve — 1.8 of 26 cards at
+              1440x900. Same size and colour it had inside the quiet notice,
+              one position higher, and the `<strong>` carries the weight the
+              notice used to lend it.
+
+              Every width states its own layout and neither overrides the
+              other's, so nothing here depends on which order Tailwind emits
+              two utilities that set one property in. From `lg`, where the
+              split starts and the pane is what runs out, it takes the room
+              between the heading and the actions and wraps *inside* the row.
+              Below it there is no pane to run out of, so it takes a line of
+              its own — last, so that New chat stays where it has always been
+              rather than being pushed under a paragraph. Source order is the
+              reading order at both. */}
+          <p className="text-xs leading-normal text-ink-muted max-lg:order-last max-lg:basis-full lg:min-w-0 lg:flex-1">
+            <strong className="font-semibold text-ink">
+              Nothing here starts a run.
+            </strong>{" "}
+            Each proposal waits for you, and then runs under the guards of the
+            template it names — never under anything the chat chose.
+          </p>
           <div className="ml-auto flex items-center gap-3">
+            {/* What the figure counts is said, because what it leaves out is
+                the turn the operator is most likely watching: `--output-format
+                json` puts no cost on the wire until the child exits, so a turn
+                in flight has spent money this number cannot yet see. Unsaid, a
+                total that does not move for ten minutes reads as a turn that is
+                not costing anything. */}
             {chat && chat.costUSD > 0 && (
               <span className="text-xs tabular-nums text-ink-muted">
-                {fmtUSD(chat.costUSD)} this chat
+                {fmtUSD(chat.costUSD)} this chat, settled turns only
               </span>
             )}
             <Button variant="secondary" onClick={() => void newChat()}>
@@ -789,22 +899,15 @@ export default function ChatPage() {
         {/* Two paragraphs of standing context stood between the heading and a box
             that fills what is left of the pane, and everything they cost came off
             the box — which is how the composer at the foot of it ended up under
-            the fold on a short window. What stays visible is the sentence that
-            has to be read before anything on this page is pressed: hiding *that*
-            would be trading a safety claim for a few lines of room, and the rule
-            is that a disclosure holds what some readers need rather than what all
-            of them do. The rest is read once, and is a press away with its
-            subject named on the summary. */}
+            the fold on a short window. What is left here is the half that is read
+            once, a press away with its subject named on the summary; the sentence
+            that has to be read before anything on this page is pressed did not go
+            behind the fold, it went up beside the `<h1>`, where the row it joined
+            was already that tall. A fact a decision is approved against is never
+            folded however rare it is — what changed is only that keeping it
+            visible now costs the box below nothing. */}
         <Notice tone="info" quiet>
-          <p>
-            <strong>Nothing here starts a run.</strong> Each proposal waits for
-            you, and then runs under the guards of the template it names — never
-            under anything the chat chose.
-          </p>
-          <Disclosure
-            className="mt-1.5"
-            summary="What the chat itself may do, and what its turns cost"
-          >
+          <Disclosure summary="What the chat itself may do, and what its turns cost">
             <p className="mt-2">
               A proposal that names no template runs under the default guard set
               in <Link href="/settings">Settings</Link>.
@@ -892,6 +995,7 @@ export default function ChatPage() {
                             questions={item.questions}
                             busy={busy}
                             thinking={thinking}
+                            turnFailed={chat.status === "failed"}
                             error={answerError}
                             onAnswer={(answers) => void answer(answers)}
                           />
@@ -910,16 +1014,49 @@ export default function ChatPage() {
                             prev?.kind === "message" &&
                             prev.message.role === item.message.role
                           }
+                          systemKind={
+                            item.message.id === failureMessageId
+                              ? "failure"
+                              : "note"
+                          }
                         />
                       );
                     })
                   )}
 
-                  {thinking && <Waiting since={waitingSince} stale={pollError !== null} />}
+                  {thinking && (
+                    <Waiting
+                      since={waitingSince}
+                      limitMs={turnLimitMs}
+                      stale={pollError !== null}
+                    />
+                  )}
 
                   {turnFailure && (
                     <div className="mt-5 max-w-[70ch] rounded-sm border-l-2 border-l-danger bg-inset px-3 py-2 text-xs leading-normal text-danger">
                       {turnFailure}
+                    </div>
+                  )}
+
+                  {/* What survives an ending, under it. The button fills the
+                      composer and focuses it; it does not post, and that is
+                      the whole reason it is allowed — nothing may start a turn
+                      but the operator pressing Send, and nothing stranded may
+                      be re-asked unattended. `caretTo` is the same mechanism
+                      the mention list inserts with. */}
+                  {chat?.status === "failed" && lastUserMessage && (
+                    <div className="mt-2 flex max-w-[70ch] flex-wrap items-center gap-2 text-xs leading-normal text-ink-muted">
+                      Your message is still in the thread.
+                      <Button
+                        size="compact"
+                        variant="secondary"
+                        onClick={() => {
+                          setDraft(lastUserMessage.text);
+                          setCaretTo(lastUserMessage.text.length);
+                        }}
+                      >
+                        Send it again
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -1249,11 +1386,33 @@ export default function ChatPage() {
                     disabled={busy}
                     onClick={() =>
                       setSelected(
-                        allSelected ? new Set() : new Set(pending.map((p) => p.id)),
+                        allSelected
+                          ? new Set()
+                          : new Set(approvable.map((p) => p.id)),
                       )
                     }
                   >
-                    {allSelected ? "Select none" : "Select all"}
+                    {/* Said on the control rather than left to the cards,
+                        because a selection that quietly came up short is
+                        indistinguishable from a list that was always that
+                        long. The label grows at the *left* end of the row, so
+                        a poll that adds a refused proposal moves nothing:
+                        Reject and Approve are held at the right by `ml-auto`.
+
+                        The count and not the reason, which is the one thing
+                        this parenthesis is not room for. Measured in Chromium
+                        against this column: the row fits a ghost of about
+                        150px beside Reject and Approve and wraps to two lines
+                        past it, and the wrap costs the list under it 44px —
+                        more than moving the standing notice's sentence up
+                        beside the `<h1>` just gave it back. "2 cannot be
+                        approved" is 218px and buys a sentence the two cards
+                        it is about already carry in red. */}
+                    {allSelected
+                      ? "Select none"
+                      : refusedCount > 0
+                        ? `Select all (skips ${refusedCount})`
+                        : "Select all"}
                   </Button>
                   <Button
                     variant="secondary"
@@ -1301,18 +1460,30 @@ export default function ChatPage() {
  * one speaker are one utterance interrupted by a newline, and repeating the
  * label says nothing.
  */
-function Message({ message, grouped }: { message: ChatMessageDTO; grouped: boolean }) {
+function Message({
+  message,
+  grouped,
+  systemKind,
+}: {
+  message: ChatMessageDTO;
+  grouped: boolean;
+  /** Which kind of `system` turn this is. Nothing else reads it. */
+  systemKind: "note" | "failure";
+}) {
   const { role, text, ts } = message;
 
   if (role === "system") {
     return (
       // The kit's quiet notice, in the thread's own rhythm: a hairline box with
-      // a neutral leading edge. Not a `Notice`, only because that component
-      // carries a margin of its own that would fight the run spacing here.
+      // a leading edge that says which kind it is. Not a `Notice`, only because
+      // that component carries a margin of its own that would fight the run
+      // spacing here.
       <div
         className={`${
           grouped ? "mt-1.5" : "mt-5"
-        } max-w-[70ch] rounded-sm border border-line border-l-[3px] border-l-line-strong bg-inset px-3 py-2 text-xs leading-normal text-ink-muted first:mt-0`}
+        } max-w-[70ch] rounded-sm border border-line border-l-[3px] bg-inset px-3 py-2 text-xs leading-normal first:mt-0 ${
+          SYSTEM_EDGE[systemKind]
+        }`}
       >
         {text}
       </div>
@@ -1375,10 +1546,29 @@ function Speaker({ name, ts }: { name: string; ts: number }) {
  * turn is, because nothing does; the elapsed time is the only real progress
  * there is, and a bar would be an invention.
  *
+ * **The ceiling is not that bar by another name.** A bar invents a completion
+ * fraction; this reports a constant the server enforces — the turn will not run
+ * past it, which is a fact about the deadline and says nothing about how near
+ * the answer is. It is stated from the first second rather than past a
+ * threshold, because it is the operator's whole basis for deciding whether to
+ * wait and it is worth least at the moment they have already waited. Past it
+ * the clause stops being a ceiling and becomes what is being done about the
+ * turn: the sweeper runs every 30s against a 60s margin, so an overrun is a
+ * state this page reaches rather than a limit case.
+ *
  * `role="status"` holds the word alone — the clock beside it is hidden from
- * assistive tech, or the turn would be announced once a second.
+ * assistive tech, or the turn would be announced once a second. The ceiling is
+ * not hidden: it changes once in ten minutes.
  */
-function Waiting({ since, stale }: { since: number; stale: boolean }) {
+function Waiting({
+  since,
+  limitMs,
+  stale,
+}: {
+  since: number;
+  limitMs: number | null;
+  stale: boolean;
+}) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -1396,15 +1586,25 @@ function Waiting({ since, stale }: { since: number; stale: boolean }) {
     );
   }
 
+  const elapsed = Math.max(0, now - since);
+  const limitMin = limitMs === null ? null : Math.round(limitMs / 60_000);
+
   return (
-    <div className="mt-5 flex items-center gap-2">
+    <div className="mt-5 flex flex-wrap items-center gap-2">
       <Spinner />
       <span role="status" className="text-xs font-medium text-ink-muted">
         Thinking…
       </span>
       <span aria-hidden="true" className="text-2xs tabular-nums text-ink-faint">
-        {fmtDuration(Math.max(0, now - since))}
+        {fmtDuration(elapsed)}
       </span>
+      {limitMs !== null && (
+        <span className="text-2xs text-ink-faint">
+          {elapsed < limitMs
+            ? `of up to ${limitMin} min`
+            : `past the ${limitMin}-minute limit; being stopped`}
+        </span>
+      )}
     </div>
   );
 }
@@ -1443,12 +1643,15 @@ function AskedQuestions({
   questions,
   busy,
   thinking,
+  turnFailed,
   error,
   onAnswer,
 }: {
   questions: ChatQuestionDTO[];
   busy: boolean;
   thinking: boolean;
+  /** The chat's last turn ended badly. A question outlives that; say so. */
+  turnFailed: boolean;
   error: string | null;
   onAnswer: (answers: Array<{ id: string; answer: string }>) => void;
 }) {
@@ -1622,6 +1825,16 @@ function AskedQuestions({
               This turn is still working — you can answer once it finishes.
             </p>
           )}
+          {/* The counterpart, and the fact that decides whether the operator
+              answers or starts over: a question is a row and survives every way
+              a turn can die, so the card is still live — but the child that
+              asked is gone, and answering spawns a new one through
+              `sendChatMessage` like any other message. */}
+          {turnFailed && (
+            <p className="mt-2 text-2xs leading-normal text-ink-faint">
+              The turn that asked this was stopped. Answering starts a new one.
+            </p>
+          )}
           {/* Inside the open branch, because the page holds one answer error
               and every question card in the thread is handed it. Drawn
               unconditionally, a refusal would also appear under every settled
@@ -1655,6 +1868,17 @@ function Proposal({
   const workflow = proposal.kind === "workflow";
   const missing = proposal.guardsSource === "missing";
   const folder = proposal.folderLabel ?? "folder from the template";
+  // Named from what is actually behind it rather than from a fixed phrase: a
+  // summary promising a prompt on a card that has none is a fold nobody opens
+  // twice, and `Disclosure`'s own note says a fold that does not say what is
+  // inside is one nobody opens at all.
+  const folded = [
+    "Full task",
+    proposal.guardsDetail ? "guards" : null,
+    proposal.promptOverride !== null ? "prompt" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <label
@@ -1678,6 +1902,19 @@ function Proposal({
           <div className="min-w-0 flex-1 text-sm leading-snug font-semibold text-ink">
             {proposal.title}
           </div>
+          {/* The chat's own label for this proposal, which is the name the
+              dependency line at the foot of a *sibling* card prints. Without it
+              on a card, "Starts after `auth-fix`" names something that appears
+              nowhere on the page and the instruction beside it — tick both — has
+              no second thing to tick. Mono and lower case because that line
+              prints it that way and a `Badge` would upper-case it: a label that
+              reads differently in the two places it appears is not one a reader
+              can match. */}
+          {proposal.specId && (
+            <span className="mono shrink-0 rounded-sm bg-inset px-1 py-0.5 text-2xs text-ink-muted">
+              {proposal.specId}
+            </span>
+          )}
           {workflow && <Badge tone="neutral">workflow</Badge>}
         </div>
         <p className="mt-1 line-clamp-3 text-xs leading-normal text-ink-muted">
@@ -1739,7 +1976,7 @@ function Proposal({
                 is a closed union with no warning or edit mark in it, and the
                 shield is ruled out for the reason the agent phrase above is
                 kept outside it. The text is unchanged and stays in this row. */}
-            {proposal.promptRewritten && (
+            {proposal.promptOverride !== null && (
               <span className="font-medium text-warn">prompt rewritten</span>
             )}
           </div>
@@ -1784,6 +2021,56 @@ function Proposal({
               : "The agent this names has been deleted, so approving it will be refused."}
           </p>
         )}
+
+        {/* What is being approved is the task, and it is the one field on this
+            card that is clipped — 162px of text in a 54px box, with no way to
+            read the rest without leaving the page. This is that way, and it is
+            a fold rather than a `title` for the reason the guard mark above
+            states for itself: a hover title is not a way of reading anything on
+            touch.
+
+            Closed, and the geometry is the argument rather than a preference.
+            The seeded batch measured 178.5px a card and 1.8 cards of 26 visible
+            at 1440×900, where un-clipping the task inline takes a card to ~290px
+            and the list to under one — so un-hiding it here would make a long
+            batch worse rather than better. What this changes is that the answer
+            exists somewhere the operator can reach without leaving the page; a
+            reader who does not open it approves on exactly what they had before,
+            which is the honest limit of it.
+
+            Inside the `<label>` and safe there: `details` is interactive
+            content, so a label's activation behaviour skips a press on the
+            summary and anything under it. Measured in Chromium against this
+            nesting — the fold opens and the checkbox does not move. */}
+        <Disclosure className="mt-2 text-2xs text-ink-muted" summary={folded}>
+          <div className="mt-1.5 flex flex-col gap-2 border-l border-line pl-2.5">
+            <p className="leading-normal whitespace-pre-wrap">{proposal.task}</p>
+
+            {/* The figures the name stands for. The name stays the card's
+                answer and is the link here, which is the other half of "a
+                template is a thing the operator wrote and can go and read": the
+                run form is the only page that writes, applies or deletes one,
+                the workflow editor's picker being a read of the list. */}
+            {proposal.guardsDetail && (
+              <p className="leading-normal">
+                <Link href="/runs/new">{proposal.templateName}</Link> —{" "}
+                {proposal.guardsDetail}
+              </p>
+            )}
+
+            {/* The mark above says a prompt was rewritten and this is the only
+                place that says what it now reads — the one half of a run a
+                model may write, and until now marked and unreadable. */}
+            {proposal.promptOverride !== null && (
+              <div>
+                <p className="font-medium text-warn">The prompt the chat wrote</p>
+                <p className="mt-1 leading-normal whitespace-pre-wrap">
+                  {proposal.promptOverride}
+                </p>
+              </div>
+            )}
+          </div>
+        </Disclosure>
       </div>
     </label>
   );

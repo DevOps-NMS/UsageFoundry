@@ -2,6 +2,7 @@
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and Meter.tsx already do.
 import {
+  CHAT_TIMEOUT_MS,
   listChats,
   listMessages,
   listProposals,
@@ -52,6 +53,8 @@ export function chatDTO(chat: ChatRow): ChatDTO {
     costUSD: chat.cost_usd,
     tokens: chat.tokens,
     error: chat.error,
+    turnStartedAt: chat.turn_started_at,
+    turnTimeoutMs: CHAT_TIMEOUT_MS,
     messages: listMessages(chat.id).map((m) => ({
       id: m.id,
       ts: m.ts,
@@ -108,7 +111,7 @@ function questionDTO(q: ChatQuestionRow): ChatQuestionDTO {
 function proposalDTOs(
   rows: ReturnType<typeof listProposals>,
 ): ChatProposalDTO[] {
-  const untemplated = defaultGuardsLabel();
+  const untemplated = spellGuards(chatGuards());
   const known = rows.some((p) => p.kind === "workflow")
     ? currentKnowledge()
     : null;
@@ -168,9 +171,15 @@ function proposalDTO(
       : p.template_id
         ? "template deleted"
         : frozen
-          ? guardsLabel(frozen)
+          ? spellGuards(frozen)
           : untemplated,
-    promptRewritten: p.prompt_override !== null,
+    // The figures behind the name, and only where a name is all the card shows.
+    // An untemplated proposal already spells them out one field up — off its own
+    // frozen set where it has one — and a deleted template has nothing left to
+    // read them off, which is the fact `guardsSource: "missing"` carries and
+    // approval refuses on.
+    guardsDetail: template ? spellGuards(template) : null,
+    promptOverride: p.prompt_override,
     agentName: agent?.name ?? null,
     // Truthy rather than `!== null`, `planProposal`'s rule: a row written before
     // the column existed reads as no agent rather than as a missing one.
@@ -178,6 +187,7 @@ function proposalDTO(
     title: p.title,
     task: p.task,
     folderLabel: folderLabel(p.mount_id, p.folder),
+    specId: p.spec_id,
     dependsOn: proposalDeps(p).map((d) => ({
       label: d.specId,
       edge: d.edge,
@@ -219,35 +229,37 @@ function proposedBlocks(
 }
 
 /**
- * What an untemplated proposal would be allowed to do, spelled out.
+ * A guard set spelled out, whoever it belongs to.
  *
- * A templated proposal says the template's name instead, because that is a
- * thing the operator wrote and can go and read. An untemplated one has no such
- * handle, so the card has to carry the guards themselves — otherwise the only
- * place the answer exists is a settings page two clicks away, and an approval
- * gate that does not show what is being approved is a gate that gets clicked
- * through.
+ * Three callers and one string on purpose — the live default set, the set an
+ * untemplated proposal froze when it was written, and a template's own figures.
+ * The card says a *template's* name rather than those figures, because that is a
+ * thing the operator wrote and can go and read, and an untemplated proposal has
+ * no such handle — so the card has to carry those guards itself, otherwise the
+ * only place the answer exists is a settings page two clicks away, and an
+ * approval gate that does not show what is being approved is a gate that gets
+ * clicked through. That argument stopped one step short: `Bug fix` names the
+ * rules without stating them, so the same sentence applies to the template's own
+ * numbers, which is what `guardsDetail` carries behind the card's fold. Written
+ * by *this* function rather than by a second one beside it, since two spellings
+ * of one guard set are two things to keep in step and the day they diverge the
+ * card asserts a ceiling the run does not have — which is the same reason a card
+ * drawn from a frozen set and one drawn from the live set are spelled by this
+ * one function: differing in *wording* would read as the guards having changed
+ * when they had not.
  *
- * Which is exactly why an untemplated proposal now freezes this set onto its
- * own row: values on a card are a promise, and a promise re-derived on every
- * poll is one the operator can be shown and never given. This stays as the
- * fallback for a row carrying none, and as what a *workflow* proposal's blocks
- * are summarised against — approving one of those saves a graph rather than
- * starting anything, so the guards it names are read when somebody presses Run.
+ * The promise in those figures is also why an untemplated proposal freezes its
+ * set onto its own row: values on a card are a promise, and a promise
+ * re-derived on every poll is one the operator can be shown and never given.
+ * The live set stays as the fallback for a row carrying none, and as what a
+ * *workflow* proposal's blocks are summarised against — approving one of those
+ * saves a graph rather than starting anything, so the guards it names are read
+ * when somebody presses Run.
+ *
+ * `RunGuards` rather than three arguments because that is already the name of
+ * this triple, and a `RunTemplate` satisfies it as it stands.
  */
-function defaultGuardsLabel(): string {
-  return guardsLabel(chatGuards());
-}
-
-/**
- * One guard set, in the words a card says it in.
- *
- * Shared by the two sets a card can be drawn from — the live one above, and the
- * one an untemplated proposal froze when it was written — because a card
- * rendered from the frozen set and a card rendered from the live one differing
- * in *wording* would read as the guards having changed when they had not.
- */
-function guardsLabel(guards: RunGuards): string {
+export function spellGuards(guards: RunGuards): string {
   const { maxIterations, maxDurationMinutes, maxRunCostUSD } = guards.budget;
 
   return [

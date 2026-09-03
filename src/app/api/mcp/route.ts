@@ -53,6 +53,7 @@ import {
   type DependencyEdge,
 } from "@/lib/orchestrator";
 import { diffAsText, runDiff } from "@/lib/diff";
+import { rivalContinuation } from "@/lib/proposalContinuation";
 import { chatGuards } from "@/lib/settings";
 import { githubRemotes, scanWorkspace } from "@/lib/workspace";
 import { mountById } from "@/lib/config";
@@ -383,8 +384,12 @@ const CHAT_TOOLS = [
         promptOverride: {
           type: "string",
           description:
-            "Replaces the template's own prompt for this run only. Use when " +
-            "the template nearly fits; the task is still appended below it.",
+            "Standing instructions replacing the template's own prompt, for " +
+            "this run only. Use when the template nearly fits. It does not " +
+            "replace the task, which is still required and is still appended " +
+            "below it — and because it is standing text rather than this " +
+            "run's brief, a batch of related proposals normally carries the " +
+            "same override word for word.",
         },
         agentId: {
           type: "string",
@@ -443,16 +448,28 @@ const CHAT_TOOLS = [
                 type: "string",
                 enum: ["on-success", "on-finish"],
                 description:
-                  "on-success starts only if that run completed; on-finish " +
-                  "starts once it is out of the way either way.",
+                  "There is no default: pick the one you mean. on-success " +
+                  "starts only if that run completed — which ends a chain " +
+                  "the operator meant to run regardless. on-finish starts " +
+                  "once it is out of the way either way — including after " +
+                  "it crashed, so anything it left half-done is what this " +
+                  "run opens on. Use on-finish for work that is worth doing " +
+                  "whether or not the first run got there, and on-success " +
+                  "for work that reads, reviews or builds on what the first " +
+                  "run produced.",
               },
               continueBranch: {
                 type: "boolean",
                 description:
                   "Carry on that run's branch instead of cutting a fresh one, " +
-                  "so this agent starts with its commits already there. Only " +
-                  "when both runs work in a checkout of their own, and only " +
-                  "one proposal may continue any given run.",
+                  "so this agent starts with its commits already there. " +
+                  "Prefer it with an on-success edge: on an on-finish edge " +
+                  "the commits already there may be half of a run that " +
+                  "crashed. It needs both runs in a checkout of their own, " +
+                  "which is a guard you do not set — check the template's " +
+                  "isolation, or the default guard set's, in list_templates " +
+                  "before you set this. Only one proposal may continue any " +
+                  "given run.",
               },
             },
             required: ["id", "edge"],
@@ -1747,10 +1764,9 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
   // function is: a chain that cannot be wired is otherwise discovered by a
   // person clicking Approve on a list of twenty, and what they are shown then
   // is one proposal failing over a label they never saw.
+  const proposals = listProposals(chatId);
   const labels = new Map(
-    listProposals(chatId)
-      .filter((p) => p.spec_id)
-      .map((p) => [p.spec_id!, p]),
+    proposals.filter((p) => p.spec_id).map((p) => [p.spec_id!, p]),
   );
 
   const specId = String(args.id ?? "").trim() || null;
@@ -1850,6 +1866,33 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
           "of its own, so there is no branch to carry on. Both runs need guards " +
           "that isolate — a template that does, or ask the operator to change " +
           "the default guard set.",
+        true,
+      );
+    }
+    // The third condition `admitDependencies` refuses, and the one it is worst
+    // at refusing: a rival is another *proposal*, so what the operator is shown
+    // at the click is two run ids for two cards, and — since a proposal that
+    // fails to start is terminal — one of the cards is gone. Asked here after
+    // the guard check above, because with no branch at either end there is
+    // nothing for a rival to be claiming.
+    const rival = rivalContinuation(
+      continuing[0].specId,
+      proposals.map((p) => ({
+        specId: p.spec_id,
+        title: p.title,
+        status: p.status,
+        dependsOn: proposalDeps(p),
+      })),
+    );
+    if (rival) {
+      const named = rival.specId ? `"${rival.specId}"` : `“${rival.title}”`;
+      const instead = rival.specId
+        ? `Start this one after "${rival.specId}" instead, or drop `
+        : "That one carries no id, so nothing can be chained behind it: drop ";
+      return text(
+        `${named} is already waiting to carry on "${continuing[0].specId}"'s ` +
+          `branch, and two runs cannot extend the same one. ${instead}` +
+          "continueBranch so this one cuts a branch of its own.",
         true,
       );
     }
