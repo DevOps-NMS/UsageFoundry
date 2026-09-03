@@ -2573,7 +2573,7 @@ export interface ChatMessageDTO {
  * agreeing to — where each block runs, what it may do, how many agents a
  * deciding block may start, and whether a merge block may spend on a conflict.
  * An approval gate that does not show those is a gate that gets clicked
- * through, which is `defaultGuardsLabel`'s reasoning one level up.
+ * through, which is `spellGuards`' reasoning one level up.
  */
 export interface ProposedBlockDTO {
   name: string;
@@ -2617,8 +2617,29 @@ export interface ChatProposalDTO {
   guardsSource: "template" | "defaults" | "missing";
   /** The template's name, or the default guards written out. */
   guardsLabel: string;
-  /** The chat wrote this run's prompt instead of taking the template's. */
-  promptRewritten: boolean;
+  /**
+   * A *templated* proposal's guards written out, or null.
+   *
+   * Built by the same function that writes out the untemplated set, so the two
+   * cannot come to disagree about what a ceiling means. Null where there is
+   * nothing left to write: an untemplated proposal already carries the figures
+   * in `guardsLabel`, and a deleted template has no values to read.
+   *
+   * This is deliberately *not* on the card. The name is the card's answer —
+   * a template is a thing the operator wrote and can go and read — and the
+   * numbers go behind the fold, because `Bug fix` on its own does not say that
+   * approving it authorises twelve cycles and $4.00.
+   */
+  guardsDetail: string | null;
+  /**
+   * The prompt the chat wrote for this run in place of the template's, or null
+   * where the template's own prompt stands.
+   *
+   * The text rather than a flag, which is what it was: the card said *that* the
+   * one half of a run a model may write had been rewritten, and offered no way
+   * to read it.
+   */
+  promptOverride: string | null;
   /**
    * The saved agent this run would be started as, by name, or null for none.
    *
@@ -2639,6 +2660,15 @@ export interface ChatProposalDTO {
   task: string;
   /** Where it would run, as a person reads it. Null means "as the template says". */
   folderLabel: string | null;
+  /**
+   * The chat's own label for this proposal, which is the name a sibling's
+   * `dependsOn` holds. Null where the model gave it none.
+   *
+   * On the card for `dependsOn`'s own reason: "Starts after `auth-fix`" is an
+   * instruction with no referent unless the card being waited for says which
+   * one it is, and the label resolves to a run at approval and nowhere else.
+   */
+  specId: string | null;
   /**
    * What this run waits for, by the chat's own labels. Empty on nearly every
    * proposal. Shown rather than only acted on, because a dependency that
@@ -2702,6 +2732,27 @@ export interface ChatDTO {
   costUSD: number;
   tokens: number;
   error: string | null;
+  /**
+   * When the turn in flight was claimed, null when there is none.
+   *
+   * The clock the page draws beside "Thinking…" is measured from this and not
+   * from the last message in the thread. A turn writes into the thread itself —
+   * `save_template` appends a note mid-turn — and reading the thread restarted
+   * the elapsed time at zero on the one surface whose job is to say how long
+   * this has been going. It is the same instant `staleTurn` measures the
+   * deadline against, which is what lets the page state that deadline.
+   */
+  turnStartedAt: number | null;
+  /**
+   * `CHAT_TIMEOUT_MS`, carried rather than imported.
+   *
+   * The page says the ceiling in words, so the number has to be the one the
+   * server enforces rather than a copy that can drift from it — and the
+   * constant lives in `chat.ts`, which reaches SQLite and
+   * `node:child_process`, so a `"use client"` file may not import it even for
+   * a plain number.
+   */
+  turnTimeoutMs: number;
   messages: ChatMessageDTO[];
   proposals: ChatProposalDTO[];
   /**

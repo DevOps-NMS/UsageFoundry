@@ -647,6 +647,11 @@ export type QuestionSettlement =
  * model reads — and the model then answers about the questions that did survive
  * as though those were all it asked.
  *
+ * **The refusal may not tell the operator to reload.** The drafts are `useState`
+ * local to the question card, so a reload is precisely what destroys the four
+ * answers that were fine. It names what survives instead, which is true because
+ * this decides before anything is written.
+ *
  * **Every open question is in `entries`, answered or not.** A question left out
  * is indistinguishable from one that was never asked, and the model's next move
  * is to ask it again — a second turn and a second ten-minute window for
@@ -669,8 +674,9 @@ export function settleQuestions(
       return {
         ok: false,
         reason:
-          "That question is no longer waiting for an answer — it was answered " +
-          "or the conversation moved past it. Reload the chat.",
+          "One of these is no longer waiting for an answer — it was answered " +
+          "or the conversation moved past it — so nothing was sent. Your " +
+          "other answers are still here; press Answer again.",
       };
     }
     if (byId.has(id)) {
@@ -1648,6 +1654,9 @@ const CANCELLED_REASON =
   "You stopped this message while it was being answered.";
 const TIMED_OUT_REASON =
   `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`;
+/** `reconcileChatsOnBoot`'s, hoisted so the row and the thread cannot drift. */
+const RESTARTED_REASON =
+  "The server restarted while this message was being answered.";
 
 /**
  * Whether a turn has outlived the bound on one, given the row and the clock.
@@ -2444,13 +2453,23 @@ function finishTurn(chatId: string, r: TurnResult): void {
  * server for everything else running in it.
  */
 export function reconcileChatsOnBoot(): void {
+  // Read before the write, because the write is what makes them unfindable.
+  // Safe as two statements where nothing else is: better-sqlite3 is
+  // synchronous, and on boot nothing in this process has claimed a turn yet.
+  const stranded = db()
+    .prepare("SELECT id FROM chat_sessions WHERE status='thinking'")
+    .all() as Array<Pick<ChatRow, "id">>;
   db()
     .prepare(
       "UPDATE chat_sessions SET status='failed', turn_started_at=NULL," +
-        " error='The server restarted while this message was being answered.'" +
-        " WHERE status='thinking'",
+        " error=? WHERE status='thinking'",
     )
-    .run();
+    .run(RESTARTED_REASON);
+  // In the thread as well as on the row, for `endTurn`'s reason and hardest
+  // here of the four endings: `claimTurn` clears `error` on the next message,
+  // so the row is the only trace of a turn lost to a restart and the
+  // operator's attempt to recover from it is what erases it.
+  for (const { id } of stranded) appendMessage(id, "system", RESTARTED_REASON);
 }
 
 /* ------------------------------------------------------------------ */

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { threadItems } from "./chatThread";
+import { threadItems, turnStartInstant } from "./chatThread";
 import type { ChatMessageDTO, ChatQuestionDTO } from "./apiTypes";
 
 /**
@@ -16,6 +16,12 @@ import type { ChatMessageDTO, ChatQuestionDTO } from "./apiTypes";
  * The rest of the cases pin the pairing the panel is built on: an answered
  * question sits directly above the message that carried the answer, and a
  * pending one sits at the foot of the thread beside the composer.
+ *
+ * `turnStartInstant` is here on the same grounds one function over: it decides
+ * what the clock beside "Thinking…" counts from, and every way of getting it
+ * wrong renders a *duration* — plausible, wrong, and the number an operator
+ * uses to decide whether to keep waiting or stop a turn and lose what the child
+ * has done.
  */
 
 function msg(
@@ -138,4 +144,21 @@ test("an assistant or system message never separates a question from its answer"
 test("no questions is the transcript unchanged", () => {
   const messages = [msg("ask", "user", 1_000), msg("reply", "assistant", 3_000)];
   assert.deepEqual(order(threadItems(messages, [])), ["ask", "reply"]);
+});
+
+test("the turn's clock counts from the claim, not from the last write", () => {
+  // The defect this exists against: a turn writes into its own thread —
+  // `save_template` appends a note mid-turn — and taking the later of the two
+  // put a nine-minute turn back at zero seconds, on the one line the operator
+  // reads to decide whether to wait.
+  assert.equal(turnStartInstant(1_000, 500_000), 1_000);
+  // A row claimed before `turn_started_at` existed has no start instant, which
+  // is `staleTurn`'s own fallback and not "no clock": the thread's last write
+  // is the nearest thing there is to one.
+  assert.equal(turnStartInstant(null, 500_000), 500_000);
+  assert.equal(turnStartInstant(undefined, 500_000), 500_000);
+  // Neither is a render with no chat loaded. Null rather than 0, which the
+  // caller would draw as the elapsed time since 1970.
+  assert.equal(turnStartInstant(null, null), null);
+  assert.equal(turnStartInstant(undefined, undefined), null);
 });
