@@ -447,16 +447,28 @@ const CHAT_TOOLS = [
                 type: "string",
                 enum: ["on-success", "on-finish"],
                 description:
-                  "on-success starts only if that run completed; on-finish " +
-                  "starts once it is out of the way either way.",
+                  "There is no default: pick the one you mean. on-success " +
+                  "starts only if that run completed — which ends a chain " +
+                  "the operator meant to run regardless. on-finish starts " +
+                  "once it is out of the way either way — including after " +
+                  "it crashed, so anything it left half-done is what this " +
+                  "run opens on. Use on-finish for work that is worth doing " +
+                  "whether or not the first run got there, and on-success " +
+                  "for work that reads, reviews or builds on what the first " +
+                  "run produced.",
               },
               continueBranch: {
                 type: "boolean",
                 description:
                   "Carry on that run's branch instead of cutting a fresh one, " +
-                  "so this agent starts with its commits already there. Only " +
-                  "when both runs work in a checkout of their own, and only " +
-                  "one proposal may continue any given run.",
+                  "so this agent starts with its commits already there. " +
+                  "Prefer it with an on-success edge: on an on-finish edge " +
+                  "the commits already there may be half of a run that " +
+                  "crashed. It needs both runs in a checkout of their own, " +
+                  "which is a guard you do not set — check the template's " +
+                  "isolation, or the default guard set's, in list_templates " +
+                  "before you set this. Only one proposal may continue any " +
+                  "given run.",
               },
             },
             required: ["id", "edge"],
