@@ -17,6 +17,7 @@ import {
 import { scanUsage, type UsageEntry } from "./transcripts";
 import type {
   ContextCheckDTO,
+  ContextCompositionDTO,
   ContextOccupancyDTO,
   ContextPrunerDTO,
   ContextSampleBasisDTO,
@@ -1060,7 +1061,10 @@ export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined
       trigger: PruneTrigger;
       tokens_removed: number;
     }>;
-    if (rows.length === 0 && receipts.length === 0) return undefined;
+    const { series, total } = compositionSeries(runId);
+    if (rows.length === 0 && receipts.length === 0 && series.length === 0) {
+      return undefined;
+    }
 
     return {
       ceilingTokens: CYCLE_CONTEXT_CEILING_TOKENS,
@@ -1084,6 +1088,14 @@ export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined
       // Read here rather than left to the route, so the series and the tick that
       // produced it cannot be assembled from two different moments.
       lastCheck: lastContextCheck(runId),
+      composition: series,
+      compositionCount: total,
+      // Resolved here rather than in the component, because only this side knows
+      // which of the two blanks it is: `pruningEnabled` is the gate the reading
+      // is taken behind, and a component that guessed would tell an operator to
+      // wait for a reading nothing is going to take.
+      compositionAbsence:
+        series.length > 0 ? null : pruningEnabled() ? "pending" : "off",
     };
   } catch (err) {
     noteBookkeepingFailure("contextOccupancy", err);
@@ -1635,6 +1647,368 @@ export function parsePlan(body: string): PlannedCut | null {
   } catch {
     return null;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* What the window is made of — read-only, paced by growth             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How many readings one run may keep, oldest first.
+ *
+ * Readings rather than rows, and the distinction is the whole of the cap:
+ * one `winnow context` call writes a row per provenance, so a cap counted in
+ * rows would truncate a reading down the middle and leave a stacked area whose
+ * bands stop at different moments — a picture of a conversation that never
+ * happened. Lower than `CONTEXT_SAMPLES_PER_RUN` by two orders because each
+ * reading costs a subprocess and is paced by growth rather than by the tick:
+ * at `COMPOSITION_REMEASURE_GROWTH_TOKENS` apart, 300 readings is 7.5 million
+ * tokens of growth, which no run on this install has come near.
+ */
+export const CONTEXT_COMPOSITIONS_PER_RUN = 300;
+
+/** The newest readings a DTO carries, on `CONTEXT_SERIES_MAX_POINTS`' rule. */
+export const CONTEXT_COMPOSITION_MAX_READINGS = 120;
+
+/**
+ * How far a conversation must grow before its composition is read again.
+ *
+ * Larger than `CEILING_REMEASURE_GROWTH_TOKENS`, deliberately. That constant
+ * paces a *decision* — whether to end a cycle early — and being late with it
+ * costs money on every turn in between. This paces a *picture*, where being
+ * late costs a point on a graph, and the subprocess is the same price either
+ * way. At 40,000 a run climbing to the 200,000 ceiling draws five bands' worth
+ * of shape, which is a shape; at the ceiling's own 25,000 it would draw eight
+ * and spend 60% more subprocesses to do it.
+ *
+ * Growth is measured on the *sample*, not on winnow's window, because the
+ * sample is the figure this app already has in hand on every tick — asking
+ * winnow how much it has grown would mean spawning winnow to find out whether
+ * to spawn winnow.
+ */
+export const COMPOSITION_REMEASURE_GROWTH_TOKENS = 40_000;
+
+/**
+ * Winnow's tree depth. 1 is provenance alone, which is what a band is.
+ *
+ * Depth 2 reaches the tool or attachment class and depth 3 the file path. Both
+ * are worth reading and neither is worth *storing*: a row per path per reading
+ * per run is unbounded in the one dimension nothing here caps, and a stacked
+ * area with forty bands is not a picture. An operator who wants the tail runs
+ * `winnow context <session> --depth 3` against the transcript this page names.
+ */
+const COMPOSITION_DEPTH = "1";
+
+/** One provenance's share of one reading. Winnow's own label and kind. */
+export interface CompositionSlice {
+  label: string;
+  tokens: number;
+  kind: string;
+}
+
+/** One `winnow context` reading: its exact window and what apportions it. */
+export interface ContextComposition {
+  /**
+   * Winnow's own window total, in the same units as `apiContextTokens` and
+   * **not** anchored the same way — see `recordComposition`.
+   */
+  window: number;
+  slices: CompositionSlice[];
+}
+
+/**
+ * `winnow context --json`, for one transcript.
+ *
+ * ## What it answers that nothing else here does
+ *
+ * Every other figure on this path is a *size*: how full the window is, how much
+ * a cut would take out, what that cut would cost. None of them says what the
+ * window is made of, so an operator watching a run climb to the ceiling could
+ * see that it was climbing and had no way to tell whether it was climbing on
+ * tool output a prune would take, on a prefix a prune cannot touch, or on
+ * retained reasoning that is neither. Those three have different remedies and
+ * the graph that showed the climb was silent on which one applied.
+ *
+ * `context` writes nothing anywhere — it is beside `inspect` in winnow's own
+ * tree for exactly that reason — so it can be asked while the session is live,
+ * for the price of one subprocess.
+ *
+ * ## Why it is nonetheless gated on the feature being on
+ *
+ * `observePlan`'s rule, and for its reason rather than by analogy: read-only is
+ * not the same as permitted, and an operator who switched context pruning off
+ * has asked that winnow is not spawned against their conversation. The reading
+ * this app takes for free — `sampleContext` — stays ungated because it spawns
+ * nothing. This does, so it does not.
+ *
+ * ## Why no `--window` is passed
+ *
+ * The flag exists so winnow can print a "% full", and the only denominator this
+ * app has to offer is `CYCLE_CONTEXT_CEILING_TOKENS` — the size a *work cycle*
+ * is ended early at, which is not the model's context window and is a third of
+ * it on the 1M models. Passing it would have winnow label a percentage of this
+ * app's own policy as a percentage of the context window. The shares are
+ * computed here instead, against the window winnow did read.
+ *
+ * Failure is silence, `planCut`'s rule: a missing winnow, a malformed body, a
+ * timeout or a non-zero exit all return null. This is an observation, and an
+ * observation that could end a cycle would be worth less than not taking it.
+ */
+export function contextComposition(
+  transcriptPath: string,
+): Promise<ContextComposition | null> {
+  return new Promise((resolve) => {
+    if (!winnowAvailable()) {
+      resolve(null);
+      return;
+    }
+    let stdout = "";
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (result: ContextComposition | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+
+    try {
+      const child = spawn(
+        WINNOW_PYTHON,
+        [
+          "-m",
+          "winnow",
+          "safe",
+          "run",
+          "--",
+          "context",
+          transcriptPath,
+          "--depth",
+          COMPOSITION_DEPTH,
+          "--json",
+        ],
+        // Same credential argument as `spawnPrune` and `planCut`: this is the
+        // app's own maintenance on the app's own data, and the transcripts are
+        // root-owned.
+        { env: pruneEnv(), stdio: ["ignore", "pipe", "ignore"] },
+      );
+
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        // Bounded like `planCut`'s, though a depth-1 body is a few kilobytes:
+        // the bound is against a future `--depth` here, not against today's.
+        if (stdout.length < 4_000_000) stdout += chunk;
+      });
+
+      timer = setTimeout(() => child.kill("SIGKILL"), PRUNE_TIMEOUT_MS);
+      timer.unref?.();
+
+      child.on("error", () => finish(null));
+      child.on("close", (code) => {
+        if (code !== 0) {
+          finish(null);
+          return;
+        }
+        finish(parseComposition(stdout));
+      });
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/**
+ * The window and its top-level nodes out of `context --json`, or null.
+ *
+ * ## What null means here, and what it must not be confused with
+ *
+ * Null is *no reading*. A conversation winnow could not anchor — one with no
+ * priced request yet — reports `window` as null in its own body, and that is
+ * the same answer: nothing to draw. What is **not** null is a reading whose
+ * slices are odd, a residual that is large, or a label this app has never seen.
+ * Those are answers, and passing them through unaltered is the point: winnow
+ * owns this vocabulary, the residual is deliberately not folded into its
+ * neighbours, and a node binned as "other" here would hide the one figure whose
+ * whole job is to say what nothing accounted for.
+ *
+ * ## Why the slices are not re-derived
+ *
+ * `share` is on the wire and is ignored: it is `tokens / window` to six places,
+ * and recomputing it in the component keeps one number in one place. `tokens`
+ * is what is stored, because a share stored against a window that later moves
+ * is a figure with no denominator.
+ *
+ * A node whose token count is not a finite number is dropped rather than zeroed:
+ * a band drawn at zero says winnow measured nothing there, and a band dropped
+ * makes the slices fail to sum, which is visible. Zero is a measurement.
+ */
+export function parseComposition(body: string): ContextComposition | null {
+  try {
+    const raw = JSON.parse(body) as {
+      window?: { tokens?: unknown } | null;
+      nodes?: unknown;
+    };
+    const window = raw.window?.tokens;
+    // No anchoring request means no exact window, and every figure under it
+    // would be an estimate apportioning nothing. Winnow says so with a null and
+    // this says so with one.
+    if (typeof window !== "number" || !Number.isFinite(window) || window <= 0) {
+      return null;
+    }
+    if (!Array.isArray(raw.nodes)) return null;
+
+    const slices: CompositionSlice[] = [];
+    for (const node of raw.nodes) {
+      if (!node || typeof node !== "object") continue;
+      const { label, tokens, kind } = node as Record<string, unknown>;
+      if (typeof label !== "string" || label === "") continue;
+      if (typeof tokens !== "number" || !Number.isFinite(tokens)) continue;
+      slices.push({
+        label,
+        tokens: Math.max(0, Math.round(tokens)),
+        // Winnow states the kind on every node; an absent one is passed through
+        // as the empty string rather than guessed at, because every value this
+        // field can take is a claim about how the number was reached.
+        kind: typeof kind === "string" ? kind : "",
+      });
+    }
+    if (slices.length === 0) return null;
+    return { window: Math.round(window), slices };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store one composition reading, or do nothing.
+ *
+ * ## Why winnow's window is stored and the sample's is not
+ *
+ * They are the same measure taken from different anchors. `apiContextSample`
+ * reads the last **main-thread** `usage` frame — sidechains excluded, exactly
+ * as the ceiling excludes them, because a sub-agent's turns are not this
+ * conversation's context. Winnow anchors on the last priced request in the
+ * file, and a sub-agent's frames are written to that same file. So for as long
+ * as a sub-agent runs the two describe different conversations, and on this
+ * install that has been 22 minutes at a stretch.
+ *
+ * Scaling the slices onto the sample's figure would make the two agree by
+ * construction and would be a lie in the one case it mattered: the slices would
+ * then apportion a total they were never measured against. So winnow's own
+ * window rides on the row, the bands are drawn against it, and the component
+ * says which reading it is. Nothing subtracts one from the other.
+ *
+ * Never throws — `recordPrune`'s rule. A reading is evidence, and losing one
+ * must not turn a live run into a failed one.
+ */
+export function recordComposition(
+  runId: string,
+  iteration: number,
+  reading: ContextComposition,
+): void {
+  try {
+    const ts = Date.now();
+    // One statement per row inside one transaction, so a reading is whole or
+    // absent. A half-written reading is the stacked area's one unrecoverable
+    // state: the bands would sum to less than the window and the gap would read
+    // as unattributed context rather than as a missing row.
+    db().transaction(() => {
+      const next = db()
+        .prepare(
+          `SELECT COALESCE(MAX(reading), 0) + 1 AS n
+             FROM context_compositions WHERE run_id = ?`,
+        )
+        .get(runId) as { n: number };
+      const insert = db().prepare(
+        `INSERT INTO context_compositions
+           (ts, run_id, reading, iteration, window, label, tokens, kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const slice of reading.slices) {
+        insert.run(
+          ts,
+          runId,
+          next.n,
+          iteration,
+          reading.window,
+          slice.label,
+          slice.tokens,
+          slice.kind,
+        );
+      }
+      // Capped on the reading rather than on the row, so the oldest whole
+      // readings go and no reading is left with some of its bands.
+      db()
+        .prepare(
+          `DELETE FROM context_compositions
+            WHERE run_id = ?
+              AND reading <= ? - ?`,
+        )
+        .run(runId, next.n, CONTEXT_COMPOSITIONS_PER_RUN);
+    })();
+  } catch (err) {
+    noteBookkeepingFailure("recordComposition", err);
+  }
+}
+
+/**
+ * This run's composition readings, oldest first.
+ *
+ * Grouped in one pass over a single descending scan rather than a query per
+ * reading: the page polls this every three seconds alongside everything else on
+ * the run, and `CONTEXT_COMPOSITION_MAX_READINGS` readings is a few hundred
+ * rows either way.
+ */
+function compositionSeries(runId: string): {
+  series: ContextCompositionDTO[];
+  total: number;
+} {
+  const rows = db()
+    .prepare(
+      `SELECT ts, reading, iteration, window, label, tokens, kind
+         FROM context_compositions
+        WHERE run_id = ?
+          AND reading > (
+            SELECT COALESCE(MAX(reading), 0) - ? FROM context_compositions WHERE run_id = ?
+          )
+        ORDER BY reading ASC, id ASC`,
+    )
+    .all(runId, CONTEXT_COMPOSITION_MAX_READINGS, runId) as Array<{
+    ts: number;
+    reading: number;
+    iteration: number;
+    window: number;
+    label: string;
+    tokens: number;
+    kind: string;
+  }>;
+
+  const series: ContextCompositionDTO[] = [];
+  let current = -1;
+  for (const row of rows) {
+    if (row.reading !== current) {
+      current = row.reading;
+      series.push({
+        ts: row.ts,
+        iteration: row.iteration,
+        window: row.window,
+        slices: [],
+      });
+    }
+    series[series.length - 1].slices.push({
+      label: row.label,
+      tokens: row.tokens,
+      kind: row.kind,
+    });
+  }
+
+  const stored = db()
+    .prepare(
+      `SELECT COUNT(DISTINCT reading) AS n FROM context_compositions WHERE run_id = ?`,
+    )
+    .get(runId) as { n: number } | undefined;
+  return { series, total: stored?.n ?? series.length };
 }
 
 /* ------------------------------------------------------------------ */

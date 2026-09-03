@@ -94,6 +94,14 @@ export interface RetentionSweep {
    * these, it did not know about them.
    */
   decisions?: number;
+  /**
+   * Rows removed from `context_compositions` — rows rather than readings, since
+   * that is what a `DELETE` can report and a reading is several of them.
+   *
+   * Absent on a sweep recorded before this table was swept at all, on
+   * `samples`' reasoning.
+   */
+  compositions?: number;
   /** Isolated checkouts removed from the mounts' stores. */
   checkouts: number;
   /** Session transcripts removed from `~/.claude/projects`. */
@@ -148,9 +156,12 @@ export function sweepRunEvents(now = Date.now()): {
   telemetry: number;
   samples: number;
   decisions: number;
+  compositions: number;
 } {
   const cutoff = retentionCutoff(getSettings().eventRetentionDays, now);
-  if (cutoff === null) return { events: 0, telemetry: 0, samples: 0, decisions: 0 };
+  if (cutoff === null) {
+    return { events: 0, telemetry: 0, samples: 0, decisions: 0, compositions: 0 };
+  }
 
   const settled = TERMINAL_STATUSES.map(() => "?").join(",");
   const events = db()
@@ -199,7 +210,19 @@ export function sweepRunEvents(now = Date.now()): {
     )
     .run(cutoff, ...TERMINAL_STATUSES).changes;
 
-  return { events, telemetry, samples, decisions };
+  // The composition series rides the samples clause, because it is the other
+  // half of the same picture: it is drawn on the same axis, on the same card,
+  // and a composition outliving the occupancy it apportions would be a stack of
+  // bands with no total left to read them against.
+  const compositions = db()
+    .prepare(
+      `DELETE FROM context_compositions
+        WHERE ts < ?
+          AND run_id IN (SELECT id FROM runs WHERE status IN (${settled}))`,
+    )
+    .run(cutoff, ...TERMINAL_STATUSES).changes;
+
+  return { events, telemetry, samples, decisions, compositions };
 }
 
 /* ------------------------------------------------------------------ */
