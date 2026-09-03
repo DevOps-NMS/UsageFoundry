@@ -3,6 +3,7 @@
 // Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
 // rewrites the path alias at runtime, so a tested component has to import the
 // way src/lib, Meter.tsx and LiveTelemetry.tsx already do.
+import { Fragment, type ReactNode } from "react";
 import type { ContextOccupancyDTO, ContextSampleDTO } from "../lib/apiTypes";
 import { fmtClock, fmtDuration, fmtRelative, fmtTokens } from "../lib/format";
 import { Meter } from "./Meter";
@@ -35,8 +36,16 @@ const HOLD_NOTICE_MS = 3 * 60_000;
  * install: the prompt carries a system prompt and tool list no transcript holds,
  * while the intake filter drops tool results the transcript keeps. So a prune's
  * `tokensRemoved` is not the drop drawn here, and subtracting one from the other
- * produces a number that looks entirely ordinary. The caption is what stops
- * that, on the same grounds `LiveTelemetry`'s does.
+ * produces a number that looks entirely ordinary.
+ *
+ * The caption used to say that on every render, on the same grounds
+ * `LiveTelemetry`'s does. It no longer does: the operator read the standing
+ * paragraph as wall-of-text and asked for it gone, so **nothing on this panel
+ * states the separation to a sighted reader** — the sr-only prune table still
+ * warns at its own figures, and this comment is the rest of the record. The
+ * invariant is unchanged, only unsurfaced, and the arithmetic that breaks it
+ * still typechecks: anything editing this file, or reading these two figures
+ * together, has this paragraph and nothing on the screen to catch it.
  *
  * ## Why the ceiling travels on the wire
  *
@@ -513,13 +522,22 @@ function describeSeries(
 /* ------------------------------------------------------------------ */
 
 /**
- * What stops this figure being added to, or subtracted from, the others.
+ * What this drawing is doing that the picture alone does not say.
  *
- * The run page carries four token figures in three different currencies, and
- * `LiveTelemetry` is the precedent for where the separation lives: in the
- * component's own caption, every time the figure is drawn, rather than in a
- * note somewhere on the page. The load-bearing sentence is the third — see
- * `ContextOccupancy.test.tsx`.
+ * Every clause is conditional, so the ordinary case — an api-basis series that
+ * is complete, current and short — renders **nothing**, and this returns `null`
+ * rather than an empty `<p>`, whose bottom margin would otherwise sit under the
+ * chart with no text in it. The standing prose that used to open it, naming the
+ * two token currencies and the one-turn lag, was removed at the operator's ask:
+ * it was read as wall-of-text, being the longest paragraph in that region. What
+ * it stated is unchanged as a fact about the data and is on record on the module
+ * doc above; nothing on this panel asserts it any more except the sr-only prune
+ * table's warning at its own figures.
+ *
+ * The clauses are assembled as a list rather than written as siblings inside the
+ * `<p>` because each used to carry its own leading separator, prose having run
+ * before it. Whichever one renders first now opens the paragraph, and there is
+ * no combination in which that one may start with a space.
  */
 function Caption({
   context,
@@ -537,18 +555,13 @@ function Caption({
   const fallbacks = samples.filter((s) => s.basis === "transcript").length;
   const hiddenPrunes = prunes.length - drawnPrunes;
 
-  return (
-    <p className="mt-2 max-w-[68ch] text-xs leading-snug text-ink-muted">
-      The whole prompt as the API was billed for this run&rsquo;s last finished
-      request, against the size a work cycle is ended early at. It lags one turn
-      by construction — a cycle mid-turn shows the request before this one. The
-      pruning figures on this page are in the transcript&rsquo;s own turns
-      instead, which runs tens of thousands of tokens either side of this in both
-      directions, so a prune&rsquo;s removed tokens must not be subtracted from
-      anything here.
-      {held >= HOLD_NOTICE_MS && (
+  const clauses: { key: string; node: ReactNode }[] = [];
+
+  if (held >= HOLD_NOTICE_MS) {
+    clauses.push({
+      key: "held",
+      node: (
         <>
-          {" "}
           Nothing has moved it for {fmtDuration(held)} and it is still being
           read: the series only gains a point when this run&rsquo;s{" "}
           <em>main thread</em> finishes another request, and a long tool call or
@@ -557,53 +570,92 @@ function Caption({
           comes back. The figure is current; it is the conversation that is
           waiting.
         </>
-      )}
-      {latest.basis === "transcript" && (
+      ),
+    });
+  }
+
+  if (latest.basis === "transcript") {
+    clauses.push({
+      key: "latest-fallback",
+      node: (
         <>
-          {" "}
           This last reading had no usage frame to read and fell back to the
           transcript&rsquo;s byte estimate — a different measure rather than a
           rougher one, so the percentage above is against a quantity the rest of
           the series is not in.
         </>
-      )}
-      {fallbacks > 0 && latest.basis !== "transcript" && (
+      ),
+    });
+  }
+
+  if (fallbacks > 0 && latest.basis !== "transcript") {
+    clauses.push({
+      key: "earlier-fallbacks",
+      node: (
         <>
-          {" "}
           {fallbacks} earlier {fallbacks === 1 ? "reading" : "readings"} fell
           back to the transcript&rsquo;s byte estimate with no usage frame to
           read; those are drawn hollow, and are a different measure rather than a
           rougher one.
         </>
-      )}
-      {sampleCount > samples.length && (
+      ),
+    });
+  }
+
+  if (sampleCount > samples.length) {
+    clauses.push({
+      key: "tail",
+      node: (
         <>
-          {" "}
           Drawn from the newest {samples.length} of {sampleCount} readings — the
           end of the series, not a thinning of it. Every point returned is drawn.
         </>
-      )}
-      {samples.length > DOT_LIMIT && (
+      ),
+    });
+  }
+
+  if (samples.length > DOT_LIMIT) {
+    clauses.push({
+      key: "dots",
+      node: (
         <>
-          {" "}
           Past {DOT_LIMIT} readings the per-point dots stand down and the line is
           drawn alone — it still passes through every one of them.
         </>
-      )}
-      {hiddenPrunes > 0 && (
+      ),
+    });
+  }
+
+  if (hiddenPrunes > 0) {
+    clauses.push({
+      key: "hidden-prunes",
+      node: (
         <>
-          {" "}
           {hiddenPrunes} {hiddenPrunes === 1 ? "prune falls" : "prunes fall"}{" "}
           outside the span drawn and {hiddenPrunes === 1 ? "is" : "are"} not
           marked.
         </>
-      )}
-      {samples.length === 1 && (
-        <>
-          {" "}
-          One reading so far; the line appears from the second.
-        </>
-      )}
+      ),
+    });
+  }
+
+  if (samples.length === 1) {
+    clauses.push({
+      key: "single",
+      node: <>One reading so far; the line appears from the second.</>,
+    });
+  }
+
+  if (clauses.length === 0) return null;
+
+  return (
+    <p className="mt-2 max-w-[68ch] text-xs leading-snug text-ink-muted">
+      {clauses.map((clause, i) => (
+        <Fragment key={clause.key}>
+          {i > 0 && " "}
+          {clause.node}
+        </Fragment>
+      ))}
     </p>
   );
 }

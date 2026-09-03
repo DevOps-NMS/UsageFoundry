@@ -10,7 +10,7 @@ import type {
 } from "../lib/apiTypes";
 
 /**
- * Four failure modes, all silent, all of which render a picture that looks
+ * Five failure modes, all silent, all of which render a picture that looks
  * entirely ordinary:
  *
  *  - A percentage computed against a hardcoded 200,000. `CYCLE_CONTEXT_CEILING_TOKENS`
@@ -22,9 +22,13 @@ import type {
  *  - A fall in the line with no mark under it. That is what an operator reads as
  *    a bug in the graph rather than as the prune mechanism working, which is the
  *    single most useful thing this picture says.
- *  - The caption's currency sentence going missing. This page carries token
- *    figures in two bases that differ by tens of thousands in **both**
- *    directions, and the arithmetic across them typechecks.
+ *  - The caption rendering as an empty paragraph. Its standing prose was removed
+ *    — the operator read it as wall-of-text — so every clause left in it is
+ *    conditional, and a `<p>` with no children still takes its bottom margin
+ *    under the chart. Its currency sentence went with the prose, and with it the
+ *    assertion that used to pin that sentence: the hazard it named is unchanged
+ *    and now lives only in `ContextOccupancy.tsx`'s module doc and in the
+ *    sr-only prune table's warning at its own figures.
  *  - The age drawn against the newest *point* rather than the newest *read*.
  *    Samples are deduplicated on the `usage` frame they came from, so a run
  *    inside one sub-agent gains none for as long as that lasts — 22 minutes,
@@ -261,18 +265,38 @@ test("a prune outside the drawn span is counted, never pinned to an edge", () =>
   assert.match(html, /No prune falls inside this span/, "and the alternative says so");
 });
 
-test("the caption keeps the two token currencies apart", () => {
+test("a caption with nothing to say renders nothing at all", () => {
+  // Every clause under the chart is conditional now that the standing prose is
+  // gone, so the ordinary steady state — a complete, current, all-api series —
+  // owes the reader no paragraph, and an empty <p> would still take its own
+  // bottom margin under the chart.
   const html = render(series());
-  // The load-bearing sentence: this page carries a prune's `tokensRemoved` in
-  // `contextTokens` and this series in `apiContextTokens`, and the difference
-  // runs in both directions.
-  assert.match(html, /The pruning figures on this page are in the transcript/);
-  assert.match(html, /own turns instead/);
-  assert.match(html, /either side of this in both/);
-  assert.match(html, /must not be subtracted from anything here/);
-  // And the two facts a reader needs to place the number at all.
-  assert.match(html, /the whole prompt as the API was billed/i);
-  assert.match(html, /lags one turn by construction/);
+  assert.doesNotMatch(html, /max-w-\[68ch\]/, "no caption element is emitted");
+  // What the panel is for is untouched by that.
+  assert.match(html, /50\.0%/);
+  assert.match(html, /role="img"/);
+});
+
+test("the first clause that renders opens the paragraph", () => {
+  // Each clause carried a leading separator because prose ran before it. With
+  // the prose gone, whichever one comes first must not start with a space, and
+  // any two that render together must still be separated by one — a leading
+  // space indents the paragraph against every other block in the region, and a
+  // missing one runs two sentences together.
+  const held = render(heldSeries());
+  assert.match(held, /leading-snug text-ink-muted">Nothing has moved it for/);
+
+  const context = series({ sampleCount: 900 });
+  const two = render({
+    ...context,
+    samples: [
+      context.samples[0],
+      context.samples[1],
+      { ...context.samples[2], basis: "transcript" },
+    ],
+  });
+  assert.match(two, /text-ink-muted">This last reading had no usage frame/);
+  assert.match(two, /the series is not in\. Drawn from the newest 3 of 900/);
 });
 
 test("the sr-only prune table repeats the currency warning at its own figures", () => {
