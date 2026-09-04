@@ -5111,6 +5111,63 @@ through before trusting this unattended:
   synthetic children in shuffled order, because no transcript on this machine
   produces more than 29 under one parent.
 
+- **2026-09-04 — picking a band on the Context panel and reading what is inside
+  it.** `src/components/ContextOccupancy.tsx`. The legend rows became
+  `aria-pressed` toggles sized to `--control-h`, the bands answer a pointer as a
+  shortcut, and the picked provenance draws the newest reading's subtree under
+  the chart: largest first at every level, each row with its tokens, its share of
+  its **own parent**, winnow's `kind` word and the repeat count where winnow
+  attached one. `npm run typecheck` clean; `npm test` 2131 pass / 0 fail over 324
+  suites, of which `ContextOccupancy.test.tsx` is 36 pass / 0 fail and six of
+  those are new; `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` clean, and
+  the emitted stylesheet was read for every class this added — `bg-selection`,
+  `hover:bg-fill-hover`, `active:bg-fill-active`, `min-h-[var(--control-h)]`,
+  `max-md:min-h-11`, `-mx-1.5`, `bg-inset`, `border-line` are all present, which
+  is the check `conventions.md` requires because Tailwind emits nothing at all
+  for a spelling it does not know.
+
+  **Seen with my own eyes, but not in the app.** The component was rendered
+  through `renderToStaticMarkup` against synthetic readings, dressed in the built
+  stylesheet at the inspector's 21rem, and screenshotted in both themes:
+  a band with a two-level subtree, the residual, a band with no children in a
+  reading that has a tree elsewhere, a reading with no tree at all, a finished
+  run, and both absences. That is what found the one real defect in this change —
+  `DetailRows` did not recurse, so the artefact level was silently missing while
+  the tool level rendered perfectly and nothing failed. It is **not** the app: no
+  route, no poll, no real winnow output, and no pointer or keyboard ever went
+  near it, since a static render has no event loop.
+
+  **Not yet verified by hand:** every interaction. Nothing has *clicked* a legend
+  row, tabbed to one, pressed Space or Enter on it, clicked a band in the stack,
+  or pressed a second band while one was open — the open states above were
+  produced by seeding the initial state, so the toggle, the close-on-repick and
+  the at-most-one rule are proven by reading the reducer and not by operating it.
+  The `aria-live` line has never been heard. No real winnow tree has been drawn:
+  the labels, `kind` words and repeat counts are all invented, so nothing
+  confirms that a real depth-3 body produces rows that fit 21rem — the longest
+  synthetic path wrapped mid-token, which is `break-words` behaving correctly and
+  may still read badly against real paths. The shortfall sentence has never been
+  seen against a store that actually dropped a tail, because the per-node cap has
+  not fired on this install. And the region has not been seen inside the run page
+  at all: not in the inspector column, not under `max-md:`, and not with the
+  three-second poll re-rendering underneath it.
+
+  **What a human should run.** `docker compose up --build`, open a run with
+  context pruning switched on that has been going long enough for a composition
+  reading — `/runs/<id>`, the **Context** card in the right-hand inspector, below
+  the sparkline and its stacked composition chart. Click a legend row, say **tool
+  traffic**: the row takes a blue wash and a panel opens directly under the six
+  rows, headed "Inside tool traffic, at the one reading taken *N*m ago — not the
+  span the bands cover", then one row per tool with its tokens and its percentage
+  of the band, each with its own files indented under it and `exact · seen 4×`
+  where a file was read more than once. Click the same row again: it closes.
+  Click a different row while it is open: the panel stays put and its contents
+  change, and only one row is washed. Then do all of that from the keyboard —
+  Tab to a legend row, Space, Tab on — and confirm the focus ring is visible on
+  every row. Check that no row is ever red or amber, that no row says "other",
+  and that the reading's age in the header is *older* than the "read just now"
+  at the top of the card, which is the whole point of that sentence.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
