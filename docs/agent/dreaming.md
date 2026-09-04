@@ -156,7 +156,12 @@ things it must always say are asserted in `dreaming.test.ts`: read `CLAUDE.md`
 first; transcription is the claim and diagnosis is a hypothesis; a signature is a
 string rather than a cause; grow an existing note rather than writing a second
 one beside it; and report the paths back, which is what makes a note
-retractable.
+retractable. The run is spawned under **`bypassPermissions`** rather than
+`acceptEdits` for the same reason the prompt is the enforcement: a run a timer
+started has nobody to answer a permission prompt, `acceptEdits` auto-accepts
+file edits and still prompts for everything else, and a stalled unattended run
+writes no note before its duration cap ends it — the mode was never what bounded
+where this run may write.
 
 **The pane must keep three kinds of nothing apart**, and an empty table is the
 wrong answer to all of them: never configured (a sentence and a link to
