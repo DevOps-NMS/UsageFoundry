@@ -965,6 +965,32 @@ function migrate(db: Database.Database) {
   // the untemplated guard set in settings.
   addColumn(db, "chat_proposals", "agent_id", "TEXT");
 
+  // The model a proposed run is started on, as the chat named it, or null for
+  // "whatever the template or the operator's default says".
+  //
+  // **This is not the rule below lapsing.** A model is not a guard, and the
+  // argument is `agents.ts`': it moves cost rather than capability, and every
+  // cost guard already covers it, since the run's spend lands on its own
+  // `result` event and in its telemetry whatever model produced it. So a model
+  // the chat names changes what the run costs and nothing about what it may do:
+  // the budget, the work-cycle limit, the permission mode and the isolation
+  // choice still come from `template_id` or from `settings.chatDefaultGuards`,
+  // and there is still no field on `propose_run` and no argument anywhere that
+  // reaches one. That is also why the run page refuses to draw a model inside
+  // the guard group — a value under the shield claims to bound something.
+  //
+  // Free-form, exactly as `run_templates.model` and `agents.model` are: an
+  // alias, a full id, or `inherit`. Narrowing it to a list this build knows
+  // would refuse the model that ships next month, and getting it wrong is a
+  // spawn that fails loudly rather than a run that quietly runs wider.
+  //
+  // Precedence is stated once and applied once, in `planProposal`: this, then
+  // the template's, then `settings.defaultModel` at `createRun`.
+  //
+  // Deliberately not in PROPOSAL_BASE_COLUMNS, for the reason `guards_json`
+  // below states — `relaxProposalTemplate` runs before every `addColumn` here.
+  addColumn(db, "chat_proposals", "model", "TEXT");
+
   // The untemplated guard set as it stood when the proposal was written, as
   // JSON, and null on a templated one — whose guards are a *handle* the
   // operator can go and read, so that one is read live at the click and stays

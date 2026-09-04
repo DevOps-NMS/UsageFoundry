@@ -209,6 +209,16 @@ export interface ChatProposalRow {
    * one decides who the run *is* and never what the run may do.
    */
   agent_id: string | null;
+  /**
+   * The model this run is started on, as the chat named it, or null for none.
+   *
+   * On the *work* side beside the agent and never on the guard side, and the
+   * column note in `db.ts` is where the argument for that is: a model moves what
+   * a run costs and never what it may do, so naming one widens nothing. Null
+   * falls back to the template's model and then to `settings.defaultModel` —
+   * one precedence, resolved in `planProposal`.
+   */
+  model: string | null;
   title: string;
   task: string;
   /** The prompt the task is appended to, when the chat wrote one for this run. */
@@ -750,6 +760,14 @@ export interface ProposalInput {
   templateId: string | null;
   /** A saved agent the run is started as, by id. Null is the ordinary run. */
   agentId?: string | null;
+  /**
+   * The model the run is started on. Null takes the template's, then settings'.
+   *
+   * The one field on this object that is neither work nor a guard: it decides
+   * what the run costs, which every cost guard already covers, and nothing
+   * about what the run may do. See the column note in `db.ts`.
+   */
+  model?: string | null;
   title: string;
   task: string;
   /** Replaces the template's prompt for this run only. Null keeps it. */
@@ -773,10 +791,10 @@ export function createProposal(
   db()
     .prepare(
       `INSERT INTO chat_proposals
-         (id, chat_id, created_at, kind, template_id, agent_id, title, task,
-          prompt_override, mount_id, folder, spec_id, depends_on, graph,
+         (id, chat_id, created_at, kind, template_id, agent_id, model, title,
+          task, prompt_override, mount_id, folder, spec_id, depends_on, graph,
           guards_json, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
     )
     .run(
       id,
@@ -785,6 +803,11 @@ export function createProposal(
       kind,
       input.templateId,
       input.agentId ?? null,
+      // Written from the argument, unlike `guards_json` below, and the two
+      // sitting next to each other is the distinction worth keeping in view: a
+      // model decides what this run costs and a guard set decides what it may
+      // do, so only one of them is a thing a model may name.
+      input.model ?? null,
       input.title,
       input.task,
       input.promptOverride,
@@ -883,12 +906,21 @@ export function proposalGuards(
  * *is* the half of a run a model may write. A proposal can therefore replace
  * the template's prompt for one run, and the card says when it did.
  *
- * **The template's model is inherited here, with the prompt and the guards.**
- * That is not a third thing a proposal decides — a proposal has no model on it
- * — it is the template's own answer reaching the one surface that reads a
- * template without a form in front of it. Safe on `templates.ts`'s ground: a
- * model moves cost and never capability, so it cannot widen what this run may
- * do, and a template naming none still falls back at `createRun`.
+ * **The model is resolved here and is the third thing a proposal may write, and
+ * it is not an exception to the paragraph above either.** A model moves cost
+ * rather than capability — `agents.ts`'s own ground for `agents.model` — and
+ * every cost guard already covers it, since the run's spend lands on its own
+ * `result` event and in its telemetry whatever model produced it. So a model
+ * the chat names changes what this run costs and nothing about what it may do:
+ * the budget, the work-cycle limit, the permission mode and the isolation
+ * choice below still come from the template or from settings, and there is
+ * still no field anywhere that reaches one. A reader who finds `model` on
+ * `ProposalInput` and no note like this one will read the rule as having
+ * quietly lapsed; it has not.
+ *
+ * Precedence is stated once and applied once, right here: the proposal's model,
+ * then the template's, then null — which `createRun` turns into
+ * `settings.defaultModel`.
  *
  * **The agent is the second exception and is not one either.** A saved agent is
  * a description and a prompt: the registry refuses a tool list at the door and
@@ -911,6 +943,7 @@ export function planProposal(
     | "title"
     | "template_id"
     | "agent_id"
+    | "model"
     | "prompt_override"
   >,
   template: RunTemplate | null,
@@ -1001,17 +1034,22 @@ export function planProposal(
       // the row, so an agent deleted after the click cannot reach a later cycle
       // of the run this starts.
       agent: proposal.agent_id && agent ? agentDefinition(agent) : null,
-      // The template's, with the prompt and the guards rather than with the
-      // agent above it — and the asymmetry is deliberate. A proposal names its
-      // own agent, so inheriting the template's would override an answer this
-      // surface already gave; a proposal has no model at all, so the template
-      // is the only place the question was asked, and a template's model that
-      // reached only the run form would be a saved value the chat silently
-      // dropped. Safe to inherit for the reason `templates.ts` states: a model
-      // moves cost and never capability, and every guard below still comes from
-      // the template or from settings. Null keeps `createRun`'s
-      // `?? settings.defaultModel` as the fallback for a template naming none.
-      model: template?.model ?? null,
+      // The proposal's, then the template's, then null — the whole of the
+      // precedence, applied in the one place, and the only fallback left below
+      // it is `createRun`'s `?? settings.defaultModel`. Resolving it twice is
+      // how two surfaces stop agreeing about what a run costs.
+      //
+      // Truthy rather than `?? `: a row written before the column existed reads
+      // `undefined` on an install that has not restarted, and the empty string
+      // is what a trimmed-to-nothing argument leaves — both mean "named none"
+      // and neither may become `--model ""`, which is a spawn that fails.
+      //
+      // The proposal wins where the agent does not, and the asymmetry is what
+      // the two fields are for. Naming an agent decides who the run *is*, which
+      // the template also decided, so the proposal's answer is the later of two
+      // answers to one question. A model is a price, and the chat is the
+      // surface that knows what this particular job is worth paying for.
+      model: proposal.model?.trim() || template?.model || null,
     },
   };
 }
@@ -2754,7 +2792,10 @@ function systemPrompt(): string {
     "set. It comes from the template a proposal or a workflow block names, or,",
     "when it names none, from the operator's default guard set in Settings. What",
     "is yours is the *work*: which folder, which task, the prompt the agent is",
-    "given, and what has to happen before what.",
+    "given, and what has to happen before what. The model is yours too and is",
+    "not one of those guards — it moves what a run costs and never what it may",
+    "do — so naming one widens nothing; propose_run's own description says when",
+    "to.",
     "",
     "Look before you propose. Each tool's own description says what it returns",
     "and what it is for; what follows is only the part those do not say.",

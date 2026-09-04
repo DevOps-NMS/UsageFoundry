@@ -249,6 +249,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     task: "Fix the flaky auth test in #412.",
     template_id: "tpl1",
     agent_id: null,
+    model: null,
     prompt_override: null,
     mount_id: null,
     folder: null,
@@ -265,6 +266,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     | "title"
     | "template_id"
     | "agent_id"
+    | "model"
     | "prompt_override"
     | "guards_json"
   >;
@@ -298,13 +300,68 @@ describe("planProposal", () => {
   });
 
   /**
-   * The model gets the prompt-and-guards treatment rather than the agent's.
+   * The whole precedence, pinned rung by rung: proposal, then template, then
+   * null for `createRun` to resolve.
    *
-   * Worth pinning because the alternative is silent and is what the field was
-   * added to end: a template that saved a model, applied by a chat proposal,
-   * quietly starting on `settings.defaultModel` instead — a differently-priced
-   * run wearing the right task, which nothing on the page would report.
+   * Worth pinning because every way of getting it wrong is silent and is a
+   * differently-priced run wearing the right task, which nothing on the page
+   * would report. The rung this one adds is the top: a model the chat named
+   * displaces the operator's own default, so a proposal whose model was read
+   * second — or not at all — spends the operator's money at a price the card
+   * stated and the run never used.
    */
+  it("runs a proposal on the model the chat named, over the template's", () => {
+    const plan = planProposal(
+      proposal({ model: "claude-opus-5" }),
+      template,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, "claude-opus-5");
+    // The guards are still the template's, which is the whole point of the
+    // field being allowed at all: it moved the price and nothing else.
+    assert.equal(plan.input.permissionMode, "acceptEdits");
+    assert.equal(plan.input.isolate, true);
+  });
+
+  it("runs an untemplated proposal on the model the chat named", () => {
+    const plan = planProposal(
+      proposal({
+        template_id: null,
+        mount_id: "workspace",
+        folder: "acme/api",
+        model: "haiku",
+      }),
+      null,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, "haiku");
+  });
+
+  it("reads a blank model on the proposal as naming none", () => {
+    // Two rows arrive this way and neither means "the empty model": one
+    // written before the column existed, which reads `undefined` on an install
+    // that has not restarted, and one whose argument trimmed to nothing. Read
+    // as a value, both become `--model ""` — a spawn the CLI refuses — and
+    // neither would reach the template's own answer.
+    for (const blank of [undefined, "", "   "]) {
+      const plan = planProposal(
+        proposal({ model: blank as string | null }),
+        template,
+        defaults,
+        null,
+      );
+      assert.equal(plan.ok, true);
+      if (!plan.ok) return;
+      assert.equal(plan.input.model, "claude-sonnet-5");
+    }
+  });
+
   it("runs a proposal on the template's model", () => {
     const plan = planProposal(proposal(), template, defaults, null);
     assert.equal(plan.ok, true);

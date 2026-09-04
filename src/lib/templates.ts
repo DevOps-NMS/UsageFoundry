@@ -84,10 +84,13 @@ export interface RunTemplate {
    * from here and its agent from itself. Saying "it carries onto the run like
    * the guards do" would be true of the form and false of both of those.
    *
-   * `model` beside it is the deliberate asymmetry rather than an oversight: a
-   * proposal and a node each name their own agent, so inheriting one here would
-   * override an answer those surfaces already gave, and neither of them has a
-   * model to name at all — the template is the only place the question is asked.
+   * `model` beside it is the deliberate asymmetry rather than an oversight, and
+   * it survives a proposal having gained one of its own. A proposal and a node
+   * each name their own agent, so inheriting one here would override an answer
+   * those surfaces already gave. A node still names no model, so this is the
+   * only answer it has; a chat proposal may name one, and *that* one wins —
+   * which is inheritance working rather than an exception to it, since null on
+   * the proposal is what falls through to here.
    */
   agentId: string | null;
   /**
@@ -106,6 +109,8 @@ export interface RunTemplate {
    * Unlike `agentId`, this **is** inherited by the two server-side readers of a
    * template: `planProposal` and `planNode` take it with the prompt and the
    * guards. See the note on `agentId` above for the asymmetry and why it is one.
+   * `planProposal` reads it *second*, behind a model the chat named on the
+   * proposal itself; `planNode` has nothing above it to read.
    */
   model: string | null;
   budget: BudgetPolicy;
