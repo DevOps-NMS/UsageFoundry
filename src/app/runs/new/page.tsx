@@ -68,16 +68,19 @@ interface FormSeed {
    */
   agentId: string | null;
   /**
-   * The model the seed ran on, or nothing for "whatever Settings says".
+   * The model the seed names, or null for "whatever Settings says".
    *
-   * Optional because a template holds no model — `templates.ts` argues why —
-   * so only the copied-run path ever fills it. Copying it is not the same act
-   * as pre-filling an empty form with `settings.defaultModel`, which this page
-   * deliberately does not do: `runs.model` is a fact about the run being
-   * copied, and *Start another like this* promises the same configuration
-   * rather than today's defaults.
+   * Both paths fill it now that a template carries one. It **seeds** the field,
+   * the treatment `mountId`/`folder` get and not the treatment the prompt and
+   * the guards get: what starts the run is whatever is in the box when Start is
+   * pressed, so a template's model can be overridden for one run without
+   * editing the template. Filling it is not the same act as pre-filling an
+   * empty form with `settings.defaultModel`, which this page deliberately does
+   * not do: a seed's model is a fact about that template or that run, and both
+   * *Start another like this* and picking a template promise the configuration
+   * that was saved rather than today's defaults.
    */
-  model?: string | null;
+  model: string | null;
   budget: BudgetPolicyDTO;
 }
 
@@ -1004,8 +1007,8 @@ export default function NewRunPage() {
       agentId: seed.agentId ?? "",
       // A seed that names no model blanks the field rather than leaving what
       // is in it: every other answer here is replaced wholesale, and a model
-      // surviving a template that does not carry one would be the one value on
-      // the form the operator could not see the provenance of.
+      // surviving a template that names none would be the one value on the form
+      // the operator could not see the provenance of.
       model: seed.model ?? "",
       iterationsCapped: b.maxIterations !== null,
       maxIterations:
@@ -1118,6 +1121,12 @@ export default function NewRunPage() {
             // "" is the picker's own "no agent", and the column's null is the
             // same absence — collapsed here rather than stored as an empty id.
             agentId: agentId || null,
+            // An explicit null rather than `modelFromForm`'s absent key, which
+            // is the difference between the two doors: a blank field on a run
+            // means "let `createRun` fall back", where on a template it means
+            // "this template names no model" and has to overwrite whatever the
+            // row held before. `normalizeTemplateInput` trims it.
+            model: model || null,
             budget: budgetFromForm(current),
           }),
         },
@@ -2207,7 +2216,12 @@ export default function NewRunPage() {
                   ? "Write the task above first — the prompt is the part worth saving"
                   : nameTaken
                     ? `Replaces the template already called “${templateName.trim()}”`
-                    : "Keeps the task, the limits and how it behaves. Not the model — that stays a single global setting"
+                    : // The model is on this list now that the form offers one:
+                      // a template that saved everything but the model would
+                      // silently drop half of what was set above it. Picking
+                      // the template seeds the field rather than fixing it, so
+                      // it can still be changed for one run.
+                      "Keeps the task, the model, the limits and how it behaves"
               }
             >
               <div className="w-56">
