@@ -20,6 +20,7 @@ import { git, gitSync } from "./git";
 import { dataDirRefusal, mayWriteDataDir, requireDataDir } from "./serverLock";
 import { childCredentials, chownForChild } from "./privsep";
 import { currentSandbox, sandboxRefusal } from "./sandbox";
+import { ensureSandboxMountPoints } from "./sandboxMountPoints";
 import { db } from "./db";
 import {
   getSettings,
@@ -5621,6 +5622,22 @@ export function signalTree(
 }
 
 /**
+ * Every directory this argv grants the child beyond its working one.
+ *
+ * Read off the argv rather than passed in, so that a flag added to
+ * `buildArgs` reaches this without a second call site having to remember: what
+ * the sandbox neutralises is every tree the session can see, and today that is
+ * the vault a run gets through `vaultSkill`.
+ */
+function addDirsIn(args: readonly string[]): string[] {
+  const dirs: string[] = [];
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "--add-dir") dirs.push(args[i + 1]!);
+  }
+  return dirs;
+}
+
+/**
  * Spawn one work cycle.
  *
  * `onSession` fires the moment the stream first names a session, and again if it
@@ -5654,6 +5671,27 @@ export function runIteration(
   githubToken: string = "",
 ): Promise<IterationResult> {
   return new Promise((resolve) => {
+    // Before the spawn and not before the run, because what has to be true is
+    // the state of each tree at the moment the child constructs its sandbox.
+    // Every tree the child is handed, since the list is applied to the working
+    // directory and to each `--add-dir` alike.
+    const mountPoints = ensureSandboxMountPoints([cwd, ...addDirsIn(args)]);
+    if (mountPoints.created.length > 0) {
+      // The directories rather than the two dozen paths, which are on the event
+      // for anyone who wants them. Said once per tree and then never again,
+      // since the second cycle finds everything already there.
+      const trees = [...new Set(mountPoints.created.map((p) => path.dirname(p)))];
+      log(
+        runId,
+        `Created ${mountPoints.created.length} mount point(s) in ${trees.join(", ")} ` +
+          "so this cycle's tool calls do not fail constructing a sandbox",
+        { sandboxMountPoints: mountPoints.created },
+      );
+    }
+    for (const problem of mountPoints.problems) {
+      log(runId, `Could not create a sandbox mount point: ${problem}`);
+    }
+
     // No shell: arguments are passed as an array, so a prompt containing
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {

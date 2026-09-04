@@ -1761,6 +1761,52 @@ Built and exercised against real transcripts:
   remainder at zero and prices that at 0 turns, i.e. prune unconditionally. The
   test asserts the overshoot before asserting the fix.
 
+- **The sandbox mount-point failures were counted, their mechanism read out of
+  the pinned CLI, and the fix's git half exercised — 2026-09-04.** `run_events`
+  carries **255** failed tool calls of the shape `bwrap: Can't create file at
+  <path>: Permission denied` on ten days, 2026-08-25 to 2026-09-04, 15–56 a day,
+  naming **261** paths between them. The commands were `cat`, `sed -n`, `grep`
+  and `git log`; none of them touched the path in the message, because the
+  failure is in sandbox construction and happens before the command runs. By
+  path tail: `settings.local.json` 97, `settings.json` 55, `skills` 54, `hooks`
+  13, `workflows` 8, `routines` 8, `launch.json` 7, `output-styles` 5,
+  `scheduled_tasks.json` 2, `agents` 2, `commands` 1 — **252 of 261 inside a
+  project tree**. Of the nine that are not, eight name `policy-limits.json`,
+  `local`, `seed-admin` or `mcp-skill-archives` in the config directory, which
+  `sandboxMountPoints.ts` deliberately leaves alone, and one is `.idea` in a
+  project root, which belongs to the sandbox's *other* list — the shell and
+  editor dotfiles — and is not covered either.
+
+  **The mechanism was read, not inferred.** In `claude.exe` 2.1.260 the deny
+  builder applies one list per tree — `.claude/{settings.json,
+  settings.local.json,skills,commands,agents,hooks,launch.json,workflows,
+  routines,output-styles,scheduled_tasks.json,loop.md}` and `.mcp.json` — to the
+  working directory and then to **every ancestor up to `/`**, which is why
+  `/workspace/.claude/settings.local.json` is the single most frequent real path
+  for runs whose cwd is two levels below it. The ancestor half is guarded on
+  `.claude` already existing and the cwd half is not; `sandboxMountPointDirs`
+  copies that guard exactly. `.mcp.json` is left out: no failure named it, and
+  an empty one in a repository root is a file an operator would read as theirs.
+
+  **What was exercised by hand:** the module against a scratch tree — twelve
+  files created in the cwd (with `.claude` made for it) and twelve in an
+  ancestor that already had one, an ancestor without one skipped, and a second
+  pass creating nothing — and then in a real linked worktree, where after the
+  fill `git status --porcelain` is empty and `git add -A --dry-run` stages
+  nothing. That last one is the half that matters beyond tidiness: eleven of the
+  fourteen repositories here do not ignore `.claude/`, so without the
+  `.claude/.gitignore` the placeholders would ride a run's `git add -A` onto its
+  branch, and a leftover would fail `ensureWorktree`'s clean-slot check.
+
+  **Not yet verified by hand:** no sandboxed cycle has run with the fix. The
+  container was deliberately left alone rather than rebuilt — runs were active —
+  so nothing here shows bwrap finding the mount points and binding over them,
+  which is the whole claim. `npm run typecheck` is exit 0 and `npm test` passes
+  apart from one pre-existing `backupRestore` failure that also fails on a clean
+  tree. What settles it is the `bwrap: Can't create file` count in `run_events`
+  after the next `docker compose up --build`: it should go to zero for project
+  trees and keep the handful in the config directory and the one `.idea`.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
