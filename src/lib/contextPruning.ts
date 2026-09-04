@@ -18,6 +18,7 @@ import { scanUsage, type UsageEntry } from "./transcripts";
 import type {
   ContextCheckDTO,
   ContextCompositionDTO,
+  ContextCompositionNodeDTO,
   ContextOccupancyDTO,
   ContextPrunerDTO,
   ContextSampleBasisDTO,
@@ -1691,19 +1692,82 @@ export const COMPOSITION_REMEASURE_GROWTH_TOKENS = 40_000;
 /**
  * Winnow's tree depth. 1 is provenance alone, which is what a band is.
  *
- * Depth 2 reaches the tool or attachment class and depth 3 the file path. Both
- * are worth reading and neither is worth *storing*: a row per path per reading
- * per run is unbounded in the one dimension nothing here caps, and a stacked
- * area with forty bands is not a picture. An operator who wants the tail runs
- * `winnow context <session> --depth 3` against the transcript this page names.
+ * 3 is the whole tree: the provenance, then the tool or attachment class, then
+ * the artefact — a file path with its repeat count, a Bash command head, an MCP
+ * tool, one sub-agent's return. **The chart is unaffected.** It draws one band
+ * per top-level provenance and nothing else, from the same rows it drew from at
+ * depth 1; the two levels below exist for a detail view, which is a different
+ * question asked of the same reading.
+ *
+ * What is stored, and the distinction is the whole of the bound:
+ *
+ * - The **series** is still one row per provenance per reading, which is what
+ *   `CONTEXT_COMPOSITIONS_PER_RUN` counts readings for. A reading truncated down
+ *   the middle is a picture of a conversation that never happened, and that
+ *   argument survives only while a reading is a handful of rows.
+ * - The **tree** is the newest reading's only, replaced whole on every reading,
+ *   in `context_composition_children`. That is what bounds the store by *runs*
+ *   rather than by readings × paths — the second is unbounded in the one
+ *   dimension nothing here caps, since nothing limits how many distinct files a
+ *   run may touch. The next reader will ask why the tree is not a series: it is
+ *   because a detail view answers "what is in this window **now**", which the
+ *   newest reading is, and not "what was in the third of forty", which no store
+ *   this app can afford would answer.
+ *
+ * Within one reading, `COMPOSITION_CHILDREN_PER_NODE` bounds each node's own
+ * children.
  */
-const COMPOSITION_DEPTH = "1";
+const COMPOSITION_DEPTH = "3";
+
+/**
+ * How many children of one node survive into the store, largest first.
+ *
+ * A cap rather than a pool: the tail is **dropped**, never summed into an
+ * "other" sibling, on `parseComposition`'s own rule — a set of children that
+ * falls short of its parent is visible, where a manufactured bin is a band
+ * indistinguishable from the residual, the one node whose whole job is to say
+ * what nothing accounted for.
+ *
+ * Measured 2026-09-04 against the pinned winnow, on the four largest transcripts
+ * on this install (7.2 MB to 12.9 MB of JSONL): a depth-3 body carries 72 to 110
+ * sub-nodes in total and at most 29 under any one parent. So this does not fire
+ * on anything here and is not tuning — it is the ceiling for the session that
+ * reads a thousand distinct files, whose tree would otherwise be a thousand rows
+ * for one run.
+ */
+const COMPOSITION_CHILDREN_PER_NODE = 64;
+
+/**
+ * One node below a provenance: the tool or attachment class, or the artefact.
+ *
+ * Winnow's own vocabulary throughout, on `parseComposition`'s rule — a label
+ * this app did not anticipate is carried as itself rather than binned.
+ */
+export interface CompositionChild {
+  /** Winnow's key, with the `×N` below lifted off it — see `splitRepeat`. */
+  label: string;
+  tokens: number;
+  kind: string;
+  /**
+   * How many times winnow saw this artefact, or null where it attached no
+   * count — which winnow does for every node above the artefact level and for
+   * an artefact it saw once. Null is "winnow said nothing", not "once".
+   */
+  repeat: number | null;
+  /** The level below this one, empty at the deepest `COMPOSITION_DEPTH` reaches. */
+  children: CompositionChild[];
+}
 
 /** One provenance's share of one reading. Winnow's own label and kind. */
 export interface CompositionSlice {
   label: string;
   tokens: number;
   kind: string;
+  /**
+   * This provenance's subtree. Parsed on every reading and stored for the newest
+   * one only — see `COMPOSITION_DEPTH` and `recordComposition`.
+   */
+  children: CompositionChild[];
 }
 
 /** One `winnow context` reading: its exact window and what apportions it. */
@@ -1796,8 +1860,13 @@ export function contextComposition(
 
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
-        // Bounded like `planCut`'s, though a depth-1 body is a few kilobytes:
-        // the bound is against a future `--depth` here, not against today's.
+        // Bounded like `planCut`'s, and 4 MB is still right at depth 3, which
+        // is what this used to be written against as a future. Measured
+        // 2026-09-04 on the four largest transcripts on this install — 7.2 MB to
+        // 12.9 MB of JSONL — a depth-3 `--json` body came back at 18 KB to 29 KB.
+        // The body grows with the number of *distinct* artefacts and not with
+        // the transcript, so the headroom here is two orders and the bound stays
+        // what it is for: a winnow that goes wrong, not a session that gets big.
         if (stdout.length < 4_000_000) stdout += chunk;
       });
 
@@ -1841,7 +1910,8 @@ export function contextComposition(
  *
  * A node whose token count is not a finite number is dropped rather than zeroed:
  * a band drawn at zero says winnow measured nothing there, and a band dropped
- * makes the slices fail to sum, which is visible. Zero is a measurement.
+ * makes the slices fail to sum, which is visible. Zero is a measurement. The
+ * children below follow the same rule, for the same reason.
  */
 export function parseComposition(body: string): ContextComposition | null {
   try {
@@ -1865,12 +1935,16 @@ export function parseComposition(body: string): ContextComposition | null {
       if (typeof label !== "string" || label === "") continue;
       if (typeof tokens !== "number" || !Number.isFinite(tokens)) continue;
       slices.push({
+        // No `splitRepeat` here. Winnow attaches a repeat count from the third
+        // level down only, where the key is an artefact rather than a category,
+        // so a provenance carrying one would be a label this app invented.
         label,
         tokens: Math.max(0, Math.round(tokens)),
         // Winnow states the kind on every node; an absent one is passed through
         // as the empty string rather than guessed at, because every value this
         // field can take is a claim about how the number was reached.
         kind: typeof kind === "string" ? kind : "",
+        children: parseChildren((node as Record<string, unknown>).children),
       });
     }
     if (slices.length === 0) return null;
@@ -1878,6 +1952,68 @@ export function parseComposition(body: string): ContextComposition | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Winnow's `×N` lifted off an artefact label.
+ *
+ * `context.py`'s `decorate()` composes it as the key, two spaces, `×` and the
+ * count, from the third level down and only where the count is more than one.
+ * Split here rather than stored composed, because the two are different facts: a
+ * detail view grouping or sorting by path must not be sorting by *how many
+ * times*, and one that forgot to strip it prints `×43` inside what it labels a
+ * file path. Everything else about the key survives byte for byte.
+ *
+ * Anchored on the whole label, so it is a no-op on every label winnow did not
+ * decorate — including `--by-path`'s own override, `path  ×3 (Read ×2, Edit)`,
+ * which ends in a bracket. This app does not pass that flag; the anchor is why
+ * the label would still survive whole if it ever did.
+ *
+ * A count that is not a plain integer above one leaves the label alone rather
+ * than being coerced: winnow's own composition cannot produce one, so a match
+ * that shape means the label was never decorated and the suffix is the artefact.
+ */
+function splitRepeat(label: string): { label: string; repeat: number | null } {
+  const match = /^(.+)  ×(\d+)$/.exec(label);
+  if (!match) return { label, repeat: null };
+  const repeat = Number(match[2]);
+  if (!Number.isSafeInteger(repeat) || repeat <= 1) return { label, repeat: null };
+  return { label: match[1], repeat };
+}
+
+/**
+ * One level of winnow's tree below a provenance, and every level under it.
+ *
+ * Recursive rather than two hardcoded passes, so the shape follows
+ * `COMPOSITION_DEPTH` instead of restating it: raising the flag deepens the
+ * parse and nothing here has to be told.
+ *
+ * Bounded per node at `COMPOSITION_CHILDREN_PER_NODE`. The sort fires only when
+ * the cap does, which means winnow's own order — largest first — reaches the
+ * store untouched in every case that occurs on this install, and the cap's
+ * promise that the largest survive does not rest on another program's sort.
+ */
+function parseChildren(raw: unknown): CompositionChild[] {
+  if (!Array.isArray(raw)) return [];
+  const children: CompositionChild[] = [];
+  for (const node of raw) {
+    if (!node || typeof node !== "object") continue;
+    const { label, tokens, kind, children: below } = node as Record<string, unknown>;
+    if (typeof label !== "string" || label === "") continue;
+    if (typeof tokens !== "number" || !Number.isFinite(tokens)) continue;
+    const split = splitRepeat(label);
+    children.push({
+      label: split.label,
+      tokens: Math.max(0, Math.round(tokens)),
+      kind: typeof kind === "string" ? kind : "",
+      repeat: split.repeat,
+      children: parseChildren(below),
+    });
+  }
+  if (children.length <= COMPOSITION_CHILDREN_PER_NODE) return children;
+  return [...children]
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, COMPOSITION_CHILDREN_PER_NODE);
 }
 
 /**
@@ -1946,6 +2082,52 @@ export function recordComposition(
               AND reading <= ? - ?`,
         )
         .run(runId, next.n, CONTEXT_COMPOSITIONS_PER_RUN);
+
+      // The tree is replaced whole, and the delete is unconditional on the run
+      // rather than keyed on a reading number: the store holds the newest
+      // reading's tree and no other, which is what bounds it by runs instead of
+      // by readings × paths. Inside the same transaction as the bands above, so
+      // a run is never left showing one reading's stack over another's tree.
+      db()
+        .prepare(`DELETE FROM context_composition_children WHERE run_id = ?`)
+        .run(runId);
+      const insertChild = db().prepare(
+        `INSERT INTO context_composition_children
+           (ts, run_id, reading, provenance, parent, label, tokens, kind, repeat_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      // Two levels, which is exactly what `COMPOSITION_DEPTH` asks winnow for.
+      // Written flat rather than walked to the bottom because `parent` is a
+      // label and not a path: a third level would need a key that says which
+      // second-level node it hung under, and there is no third level to store.
+      for (const slice of reading.slices) {
+        for (const child of slice.children) {
+          insertChild.run(
+            ts,
+            runId,
+            next.n,
+            slice.label,
+            "",
+            child.label,
+            child.tokens,
+            child.kind,
+            child.repeat,
+          );
+          for (const artefact of child.children) {
+            insertChild.run(
+              ts,
+              runId,
+              next.n,
+              slice.label,
+              child.label,
+              artefact.label,
+              artefact.tokens,
+              artefact.kind,
+              artefact.repeat,
+            );
+          }
+        }
+      }
     })();
   } catch (err) {
     noteBookkeepingFailure("recordComposition", err);
@@ -1953,12 +2135,20 @@ export function recordComposition(
 }
 
 /**
- * This run's composition readings, oldest first.
+ * This run's composition readings, oldest first, the newest carrying its tree.
  *
  * Grouped in one pass over a single descending scan rather than a query per
  * reading: the page polls this every three seconds alongside everything else on
  * the run, and `CONTEXT_COMPOSITION_MAX_READINGS` readings is a few hundred
  * rows either way.
+ *
+ * The tree is a second query and is attached to the newest reading only, because
+ * that is the only reading it is stored for. Matched on the reading number
+ * rather than assumed to belong to the last entry: a reading landing between the
+ * two queries would leave the tree describing a stack this call did not return,
+ * and attaching it anyway would draw one reading's artefacts under another's
+ * provenances. Where they disagree, nothing is attached and the page has a stack
+ * with no detail — which is the state every reading before this one is in.
  */
 function compositionSeries(runId: string): {
   series: ContextCompositionDTO[];
@@ -2000,8 +2190,10 @@ function compositionSeries(runId: string): {
       label: row.label,
       tokens: row.tokens,
       kind: row.kind,
+      children: [],
     });
   }
+  if (series.length > 0) attachChildren(runId, current, series[series.length - 1]);
 
   const stored = db()
     .prepare(
@@ -2009,6 +2201,72 @@ function compositionSeries(runId: string): {
     )
     .get(runId) as { n: number } | undefined;
   return { series, total: stored?.n ?? series.length };
+}
+
+/**
+ * Hang the stored tree on one reading's slices, in place.
+ *
+ * The rows are flat — `provenance`, then `parent`, which is the empty string on
+ * a node hanging straight off a provenance — and they arrive parent-before-child
+ * because that is the order `recordComposition` writes them in and `id` is the
+ * order it wrote. So one pass suffices: a second-level node registers where its
+ * own children go before any of them is read.
+ *
+ * A node whose parent is not in the map is dropped rather than raised to the top
+ * level, on the parse's rule. The two are written in one transaction so it
+ * cannot happen; if it ever does, a subtree short of one branch is visible where
+ * an artefact reparented under the wrong provenance is not.
+ */
+function attachChildren(runId: string, reading: number, into: ContextCompositionDTO): void {
+  const rows = db()
+    .prepare(
+      `SELECT provenance, parent, label, tokens, kind, repeat_count
+         FROM context_composition_children
+        WHERE run_id = ? AND reading = ?
+        ORDER BY id ASC`,
+    )
+    .all(runId, reading) as Array<{
+    provenance: string;
+    parent: string;
+    label: string;
+    tokens: number;
+    kind: string;
+    repeat_count: number | null;
+  }>;
+  if (rows.length === 0) return;
+
+  const byProvenance = new Map<string, ContextCompositionNodeDTO[]>();
+  // Keyed on provenance *and* label, and joined on a byte no winnow label can
+  // contain: two provenances can carry the same second-level key, and a key
+  // built by concatenating with a printable separator would let one subtree's
+  // artefacts land under another whose labels happen to straddle it.
+  const byParent = new Map<string, ContextCompositionNodeDTO[]>();
+  const parentKey = (provenance: string, label: string) =>
+    `${provenance}\u0000${label}`;
+  for (const row of rows) {
+    const node: ContextCompositionNodeDTO = {
+      label: row.label,
+      tokens: row.tokens,
+      kind: row.kind,
+      repeat: row.repeat_count,
+      children: [],
+    };
+    if (row.parent !== "") {
+      byParent.get(parentKey(row.provenance, row.parent))?.push(node);
+      continue;
+    }
+    let siblings = byProvenance.get(row.provenance);
+    if (!siblings) {
+      siblings = [];
+      byProvenance.set(row.provenance, siblings);
+    }
+    siblings.push(node);
+    byParent.set(parentKey(row.provenance, row.label), node.children);
+  }
+
+  for (const slice of into.slices) {
+    slice.children = byProvenance.get(slice.label) ?? [];
+  }
 }
 
 /* ------------------------------------------------------------------ */
