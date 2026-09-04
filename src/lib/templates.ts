@@ -32,10 +32,12 @@ import { MAX_TEMPLATE_NAME } from "./apiTypes";
  *
  * What a template deliberately does **not** hold:
  *
- * - **The model.** `settings.defaultModel` already sets it globally and the run
- *   form does not offer it at all. Two places to set one thing is how they
- *   drift, and the second place would be the one nobody remembers to check.
- *   `agentId` below is not a second one, though the singular flag brought it
+ * - **The model.** The run form offers one and `settings.defaultModel` is what a
+ *   run that names none falls back to — so the question is already answered per
+ *   run, in front of whoever is starting it. More places to set one thing is how
+ *   they drift, and a saved one is the place nobody remembers to check — it is
+ *   read on a day the operator is looking at the task, not at the model.
+ *   `agentId` below is not another one, though the singular flag brought it
  *   closer than it was: an agent's own `model` is now the *session's*, so what
  *   keeps it off this list is that an explicit `--model` outranks it — measured
  *   on the pin — which makes it a fallback for a run that named none rather than
