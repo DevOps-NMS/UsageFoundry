@@ -1035,9 +1035,13 @@ export function nextTurnIndex(
  *
  * The prune marks travel with them for the same kind of reason: context falling
  * by tens of thousands of tokens between two samples is an unexplained cliff
- * unless the thing that caused it is on the same axis. They are read from
- * `prune_receipts` rather than recomputed — that table already holds them and is
- * the one record of what a cut took out.
+ * unless the thing that caused it is on the same axis. They are read rather than
+ * recomputed — the cut tables already hold them and are the record of what a cut
+ * took out — and there are **two** of them. Reading `prune_receipts` alone drew
+ * no mark at all on a run the fork engine cut, and reported zero prunes beside a
+ * pruning section, in the same response and from the same handler, that reported
+ * one: the failure `pricedCuts` documents having already been fixed for the
+ * dashboard, arriving unchanged at the other reader.
  *
  * Undefined when this run has neither, so a caller can drop the section rather
  * than ship an empty series on a three-second poll.
@@ -1062,10 +1066,68 @@ export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined
       trigger: PruneTrigger;
       tokens_removed: number;
     }>;
+    // The other cut table. A fork writes a new transcript instead of editing
+    // one, so `recordPrune` never runs and there is no receipt to find; `written
+    // = 1` is what separates a cut that happened from a refusal that did not,
+    // and only a cut may draw a mark.
+    const forks = db()
+      .prepare(
+        `SELECT ts, removed_bytes, net_bytes, suffix_bytes, trigger, context_tokens_after
+           FROM fork_attempts
+          WHERE run_id = ? AND written = 1 ORDER BY ts DESC LIMIT ?`,
+      )
+      .all(runId, CONTEXT_PRUNE_MARKS_MAX) as Array<{
+      ts: number;
+      removed_bytes: number;
+      net_bytes: number;
+      suffix_bytes: number;
+      trigger: PruneTrigger | null;
+      context_tokens_after: number | null;
+    }>;
     const { series, total } = compositionSeries(runId);
-    if (rows.length === 0 && receipts.length === 0 && series.length === 0) {
+    if (
+      rows.length === 0 &&
+      receipts.length === 0 &&
+      forks.length === 0 &&
+      series.length === 0
+    ) {
       return undefined;
     }
+
+    // Merged on `ts` rather than concatenated: an install that changed engines
+    // has cuts of both kinds in one run's life, and a mark drawn out of order
+    // points at the wrong fall in the series. Newest first for the cap, for the
+    // reason the samples are read that way, and reversed with them for drawing.
+    const marks = [
+      ...receipts.map((r) => ({
+        ts: r.ts,
+        trigger: r.trigger,
+        tokensRemoved: r.tokens_removed,
+      })),
+      ...forks.map((f) => {
+        // Through `forkCutFromRow` rather than beside it. The bytes-to-tokens
+        // change of basis, and what a row with no recorded trigger is read as,
+        // are that function's rules; a second copy of them here would drift from
+        // the priced figure the same page prints one section down, and a fork's
+        // bytes reaching the wire as if they were a receipt's `tokens_removed`
+        // would overstate every fork mark by a factor of 3.6.
+        const cut = forkCutFromRow({
+          ts: f.ts,
+          runId,
+          removedBytes: f.removed_bytes,
+          netBytes: f.net_bytes,
+          suffixBytes: f.suffix_bytes,
+          // Only the pricing reads the model, and a mark is not priced.
+          model: null,
+          trigger: f.trigger,
+          contextTokensAfter: f.context_tokens_after,
+        });
+        return { ts: cut.ts, trigger: cut.trigger, tokensRemoved: cut.tokensRemoved };
+      }),
+    ]
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, CONTEXT_PRUNE_MARKS_MAX)
+      .reverse();
 
     return {
       ceilingTokens: CYCLE_CONTEXT_CEILING_TOKENS,
@@ -1080,12 +1142,13 @@ export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined
         turnsExact: r.turns_exact !== 0,
       })),
       sampleCount: countFor("context_samples", runId, rows.length, CONTEXT_SERIES_MAX_POINTS),
-      prunes: receipts.reverse().map((r) => ({
-        ts: r.ts,
-        trigger: r.trigger,
-        tokensRemoved: r.tokens_removed,
-      })),
-      pruneCount: countFor("prune_receipts", runId, receipts.length, CONTEXT_PRUNE_MARKS_MAX),
+      prunes: marks,
+      // Both tables, because the pruning section on the same page counts both:
+      // one response saying a run pruned once and never pruned at all is the
+      // whole of what this figure got wrong.
+      pruneCount:
+        countFor("prune_receipts", runId, receipts.length, CONTEXT_PRUNE_MARKS_MAX) +
+        countFor("fork_attempts", runId, forks.length, CONTEXT_PRUNE_MARKS_MAX, "written = 1"),
       // Read here rather than left to the route, so the series and the tick that
       // produced it cannot be assembled from two different moments.
       lastCheck: lastContextCheck(runId),
@@ -1110,11 +1173,23 @@ export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined
  * A short page proves the total by itself, and this route is polled every three
  * seconds per open run page — so the `COUNT(*)` is skipped on the case that is
  * almost always the one in front of it.
+ *
+ * `extra` narrows the count to the same rows the caller's own SELECT took, and
+ * is a literal at the call site exactly as `table` is — both are interpolated,
+ * and nothing on this path may ever take either from a request.
  */
-function countFor(table: string, runId: string, returned: number, limit: number): number {
+function countFor(
+  table: string,
+  runId: string,
+  returned: number,
+  limit: number,
+  extra?: string,
+): number {
   if (returned < limit) return returned;
   const row = db()
-    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE run_id = ?`)
+    .prepare(
+      `SELECT COUNT(*) AS n FROM ${table} WHERE run_id = ?${extra ? ` AND ${extra}` : ""}`,
+    )
     .get(runId) as { n: number };
   return row.n;
 }

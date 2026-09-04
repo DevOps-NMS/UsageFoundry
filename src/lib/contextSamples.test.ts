@@ -83,6 +83,9 @@ after(() => {
 beforeEach(() => {
   dbMod.db().prepare("DELETE FROM context_samples").run();
   dbMod.db().prepare("DELETE FROM prune_receipts").run();
+  // The other cut table, and it has to be swept for the same reason the first
+  // does: a fork left behind by one case draws a mark on the next one's series.
+  dbMod.db().prepare("DELETE FROM fork_attempts").run();
   // In memory rather than in a row, so it survives the two deletes above and
   // would otherwise carry one case's reading into the next.
   pruningMod.forgetContextCheck("r1");
@@ -515,9 +518,109 @@ describe("contextOccupancy", () => {
     assert.equal(dto.lastCheck, null);
   });
 
+  it("marks a cut the fork engine made, which files no receipt to be found", () => {
+    // The fork engine writes a `fork_attempts` row and never calls
+    // `recordPrune`, so a panel reading receipts alone drew a series with no
+    // mark on it and reported zero prunes — while the pruning section on the
+    // same page, out of the same response, priced the cut it could see. A
+    // series with no marks does not read as a gap; it reads as a conversation
+    // that grew and was never cut, which is the opposite of what happened.
+    const file = transcript("fork-marks.jsonl", [turn("m1", { input: 10, read: 90_000 })]);
+    pruningMod.sampleContext("r1", 1, file);
+    insertFork({ ts: Date.now(), netBytes: 36_000, trigger: "boundary" });
+
+    const view = pruningMod.contextOccupancy("r1")!;
+    assert.equal(view.prunes.length, 1);
+    assert.equal(view.prunes[0].trigger, "boundary");
+    // 36,000 net bytes over `BYTES_PER_TOKEN`, which is 3.6 — the one basis a
+    // fork is ever converted on, and the one `forkCutFromRow` prices it on. The
+    // bytes reaching the wire as if they were a receipt's `tokens_removed`
+    // would overstate the mark 3.6-fold and nothing downstream could tell.
+    assert.equal(view.prunes[0].tokensRemoved, 10_000);
+    assert.equal(view.pruneCount, 1);
+  });
+
+  it("counts both engines' cuts and puts them on one axis in order", async () => {
+    // The count is the same number the pruning section beside it prints, which
+    // goes through `pricedCuts` and has known about both tables since the
+    // dashboard was fixed. Two readers of one run disagreeing about whether it
+    // ever pruned is the defect; agreeing is the fix.
+    const file = transcript("both-engines.jsonl", [turn("m1", { input: 10, read: 90_000 })]);
+    pruningMod.sampleContext("r1", 1, file);
+    insertFork({ ts: Date.now() - 60_000, netBytes: 18_000, trigger: "early-end" });
+    pruningMod.recordPrune(
+      "r1",
+      "boundary",
+      {
+        tier: "standard",
+        tokensBefore: 100_000,
+        tokensAfter: 60_000,
+        tokensRemoved: 40_000,
+        apiTokensBefore: 150_000,
+        elapsedMs: 10,
+      },
+      "claude-opus-5",
+    );
+
+    const view = pruningMod.contextOccupancy("r1")!;
+    assert.equal(view.pruneCount, 2);
+    // Against the other reader rather than against a literal: the two are
+    // assembled into one response by one handler, and the assertion worth
+    // making is that they cannot disagree — not that each happens to say 2.
+    assert.equal(
+      view.pruneCount,
+      (await pruningMod.pruneSavings({ runId: "r1" })).prunes,
+    );
+    // Oldest first, merged on `ts` rather than one table's rows after the
+    // other's: the marks are drawn on the samples' own axis, and one out of
+    // order points at a fall in the series it did not cause.
+    assert.deepEqual(
+      view.prunes.map((p) => p.trigger),
+      ["early-end", "boundary"],
+    );
+  });
+
   it("is undefined for a run with neither samples nor prunes", () => {
     // So the route can drop the key rather than add an empty series to every
     // poll of every run that predates this.
     assert.equal(pruningMod.contextOccupancy("never-ran"), undefined);
   });
+
+  it("does not turn a refused fork into a reading of a run that never pruned", () => {
+    // `written = 0` is a fork that was planned and declined — no transcript
+    // changed and no context fell. Counting one would put a mark on a series at
+    // a moment nothing happened, and would turn "this run did not prune" into a
+    // zero-filled reading, which the panel and the pruning section beside it
+    // both draw as a different sentence.
+    insertFork({ ts: Date.now(), netBytes: 36_000, trigger: "early-end", written: 0 });
+
+    assert.equal(pruningMod.contextOccupancy("r1"), undefined);
+  });
 });
+
+/** One `fork_attempts` row, in the shape the fork engine writes. */
+function insertFork(row: {
+  ts: number;
+  netBytes: number;
+  trigger: string | null;
+  written?: number;
+}): void {
+  dbMod
+    .db()
+    .prepare(
+      `INSERT INTO fork_attempts
+         (ts, run_id, new_session_id, written, removed_bytes, net_bytes,
+          suffix_bytes, trigger, context_tokens_after)
+       VALUES (?, 'r1', 's-forked', ?, ?, ?, 300000, ?, 286894)`,
+    )
+    .run(
+      row.ts,
+      row.written ?? 1,
+      // Gross against net: the pointers winnow puts back are really there, and
+      // the mark is the net, so these have to differ or the test cannot tell
+      // which column was read.
+      Math.round(row.netBytes * 1.2),
+      row.netBytes,
+      row.trigger,
+    );
+}
