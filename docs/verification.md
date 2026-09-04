@@ -5432,6 +5432,34 @@ through before trusting this unattended:
   reading** lands, and confirm the rows swap to it without the region closing and
   without the age in its header going stale.
 
+- **The dashboard's top row, measured in a browser rather than reasoned about.**
+  The row went from two columns to three — the window card, the hoisted
+  first-party figure, the context-control tile — and the operator's constraint
+  was that the window card be at most half the row and not much less. The
+  built stylesheet was loaded into headless Chromium against the real shell
+  geometry (a 14rem sidebar, `main`'s `sm:px-5` gutters) with the exact classes
+  `page.tsx` emits, and each track's `getBoundingClientRect().width` read at
+  eight viewports. At 1920/1600/1440/1280 the window card is **50.0%** of the
+  row to one decimal (828 of 1656, 668 of 1336, 588 of 1176, 508 of 1016), the
+  tile is **256px** at all four, and the live card takes 540/380/300/220. At
+  1180 and 1024 the row is the old two-column one and the live card spans it
+  underneath — which is the whole reason the three-column template starts at
+  `xl` rather than `lg`: **half of a 760px row leaves the middle track 85px**,
+  which is not a card. Below `lg` all three stack full-width, unchanged. The
+  card itself was rendered through `renderToStaticMarkup` into the same
+  stylesheet at 540, 300 and 220px and screenshotted: legible at all three, the
+  totals line wrapping under the figure below about 500px, no overflow.
+
+  **Not yet verified by hand:** nothing here is the real page. The measurements
+  are of the emitted CSS against a stand-in for the shell, not of `/` with
+  transcripts behind it, so what is unproven is the *composition* — how a
+  half-width window card and its hero meter sit against a short card and a
+  short tile, and whether the row's ragged bottom edge under `items-start`
+  reads as deliberate at 1920. Nor has the `lg`-to-`xl` band been seen with
+  content in it: the full-width live card under the meters was measured, never
+  looked at. A human should open `/` at 1920 and at about 1100, with a run in
+  flight so the `working` badge and a moving figure are both present.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a

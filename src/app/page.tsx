@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { LiveTelemetry } from "@/components/LiveTelemetry";
+import { LiveTelemetry, LiveTelemetryAside } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { RecentBlocksCard } from "@/components/RecentBlocksCard";
 import { RepoSpendCard } from "@/components/RepoSpendCard";
@@ -517,6 +517,44 @@ export default function Dashboard() {
     pruning.activity.total.boundaries > 0 ||
     intakeFilter.running ||
     intakeFilter.ledger === "read";
+  // Spelled out per case rather than assembled from parts. Tailwind scans this
+  // file for literal class strings and emits nothing for a computed one, so a
+  // template built from a variable arrives in the browser as a class with no
+  // rule behind it — and the failure is the silent kind this page is full of:
+  // the row keeps stacking at every width and nothing throws, warns or fails a
+  // typecheck. (Scanning is literal in the other direction too: an arbitrary
+  // value written out in a comment here is compiled into the stylesheet.)
+  //
+  // Which template applies is the same question as which cards render, so the
+  // two conditions are the same ones their call sites carry. A track with no
+  // card in it is not free: the row packs left and the leftover is blank.
+  const topRowColumns = telemetry
+    ? hasContextControl
+      ? // Three columns only from `xl`. The 50% cap does not scale down: the
+        // two columns beside it are 16rem and a gap whatever the row is, so at
+        // the `lg` breakpoint — 1024px less a 14rem sidebar and the pane's
+        // gutters — half the row leaves the middle card 85px. Measured, not
+        // estimated. Below `xl` the row is what it was and the live card takes
+        // a row of its own under it, which is what `lg:order-last` below does.
+        "lg:grid-cols-[minmax(0,1fr)_minmax(0,16rem)] xl:grid-cols-[minmax(0,50%)_minmax(0,1fr)_minmax(0,16rem)]"
+      : // Nothing fixed-width in this one, so the cap costs nothing at any
+        // width and can start where the row does.
+        "lg:grid-cols-[minmax(0,50%)_minmax(0,1fr)]"
+    : hasContextControl
+      ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,16rem)]"
+      : // Nothing beside it, so nothing to make room for. Half a row of white
+        // space to the right of the meters is a worse answer to "this box could
+        // be shorter" than the wide box was.
+        "";
+  // Only when there is a third card to get out of the way of. `order-last` puts
+  // the live card after the tile in the *flow* while leaving it second in the
+  // DOM, which is the order it is read in at every width where it is beside the
+  // meters; between `lg` and `xl` it spans the row under them instead, because
+  // a full-width card is a better answer to a narrow row than a 16rem column
+  // and a hole where the third one did not fit.
+  const liveTelemetryPlacement = hasContextControl
+    ? "lg:order-last lg:col-span-2 xl:order-none xl:col-span-1"
+    : "";
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
   const planPercentages =
@@ -607,20 +645,37 @@ export default function Dashboard() {
       {header}
       {banner}
 
-      {/* The context-control tile is a column beside the meters rather than a
-          card under them, and the asymmetry is the point: `minmax(0,1fr)` against a
-          fixed 16rem, `primary` against `default`, a hero meter against a
-          `text-xl` figure. Two co-equal cards side by side would say neither
-          leads, which is the objection the comment below records — a quarter
-          of the width and one elevation down is not co-equal, so the window
-          card still leads and the conclusion pruning reaches is no longer
-          only at the bottom of the page.
+      {/* Up to three columns: the window card capped at half the row, the
+          live-telemetry card taking what is left of the remainder, the
+          context-control tile keeping its fixed 16rem. Which template applies,
+          and from which breakpoint, is `topRowColumns` above.
 
-          `items-start` so the tile keeps its own height; stretching it would
-          pad a three-line card out to the meters' and make the empty space
-          look like something failed to load. Below `lg` it is one column and
-          the tile follows the meters, which is the same reading order. */}
-      <div className="mb-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,16rem)] lg:items-start">
+          The window card used to be `minmax(0,1fr)` against that 16rem alone —
+          about 84% of a 1920px row — and the comment here defended the
+          asymmetry, the objection being that two co-equal cards side by side
+          would say neither leads. That objection stands and so does the answer
+          to it; what changed is which property carries it. `primary` against
+          `default`, and a hero meter against a `text-xl` figure, are what say
+          this card leads. Width was never doing that work: at 84% the extra
+          space went to a `max-w-[68ch]` paragraph in a 1400px box, while the
+          first-party spend figure — the one number on this page that moves
+          *during* a work cycle — sat 5,700px below the fold. Half a row is
+          still the widest box on the page and still the only one an elevation
+          up, so nothing about what leads has changed, and neither aside's
+          conclusion is now reachable only from the bottom of the page.
+
+          Capped at half only where something is in fact beside it. A template
+          with a track no card was rendered for packs the cards left and leaves
+          the rest of the row blank, and a cap with nothing in the space it
+          freed does the same thing on purpose — both read as something that
+          failed to load, which is what `items-start` is here to avoid one axis
+          over.
+
+          `items-start` so the asides keep their own height; stretching them
+          would pad a three-line card out to the meters' and make the empty
+          space look like something failed to load. Below `lg` it is one column
+          and they follow the meters, which is the same reading order. */}
+      <div className={`mb-4 grid gap-4 lg:items-start ${topRowColumns}`}>
         {/* The one `primary` card on the screen, and the only thing on it sized
             to be read from across a room. Both windows live in it because they
             are one subject — what may be spent — and two co-equal cards side by
@@ -849,6 +904,17 @@ export default function Dashboard() {
             </div>
           </div>
         </Card>
+
+        {/* Gated on the same value as the band at the foot of the page, and it
+            has to be: `telemetryWindow` answers `null` when nothing reported,
+            so an absent card is "no run has reported" rather than "$0.00" —
+            and $0.00 at the top of the dashboard, beside the meters, is a
+            reading an operator would act on. */}
+        {telemetry && (
+          <div className={liveTelemetryPlacement}>
+            <LiveTelemetryAside telemetry={telemetry} now={s.now} />
+          </div>
+        )}
 
         {hasContextControl && (
           <ContextControlAside
@@ -1502,7 +1568,13 @@ export default function Dashboard() {
           a run reports its own spend when its cycle ends, so a run in flight
           reads $0 on the band above until then. Absent entirely when agent
           self-reporting is off or nothing has reported — the gate is the
-          setting, never the guard figure. */}
+          setting, never the guard figure.
+
+          The headline also rides beside the meters now, on the pruning band's
+          terms: what is left here is the per-run derivation, and it stays here
+          rather than moving up with it, because a run-by-run table is what a
+          reader consults after the total tells them to and never at a glance.
+          The two figures are one `LiveTelemetryTotals`, so they cannot part. */}
       {telemetry && (
         <SourceRegion
           heading="Live from runs"
