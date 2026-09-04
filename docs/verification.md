@@ -2347,16 +2347,36 @@ through before trusting this unattended:
   template?.model ?? null` from `planProposal` and `planNode` and re-running the
   suite failed 6 tests across both, and restoring it returned the tree to green.
 
-  What was **not**: anything through a live server. A `next dev` round trip of
-  `POST`/`PUT /api/templates` — saving a model, trimming it, clearing it back to
-  null, and reading the column out of SQLite afterwards — was written and not
-  run, so the routes are covered by types and by `normalizeTemplateInput`'s unit
-  tests and by nothing that has exercised the HTTP path. Nor was the form itself:
-  that pressing *Save* posts the Model field, that picking a template seeds it,
-  and that the seeded value can be overridden for one run are all reasoned from
-  the code and unverified in a browser. Nor `docker compose`, which is
-  unavailable in this container. And, as below, no template's model has reached a
-  real `--model` on a real spawn.
+  **The routes were driven against `next dev`** on a throwaway `DATA_DIR`, with
+  the install's own `UF_AUTH_TOKEN` presented as a `Bearer` header (an
+  unauthenticated `GET /api/templates` answered 401 in the same run, so the gate
+  was up). `POST` with `"  claude-sonnet-5  "` stored `"claude-sonnet-5"`;
+  `"   "`, an absent key and a literal JSON `null` each stored `null`; `GET` read
+  all four back unchanged. `PUT` with `claude-model-that-ships-next-week` stored
+  it verbatim, which is the absence of narrowing working rather than a value
+  slipping through, and `PUT` with `""` cleared it back to `null` — the overwrite
+  case that is why the form posts an explicit `null` rather than
+  `modelFromForm`'s absent key. Reading `run_templates` straight out of SQLite
+  afterwards agreed with the payloads.
+
+  **The form was driven in Chromium** at 1440px against the same server (auth
+  off, so nothing here passed through the sign-in path). Typing
+  `claude-sonnet-5` into *Model* and pressing *Save* stored that model on the
+  template. A reloaded form's *Model* box is **empty**, not pre-filled with
+  `settings.defaultModel`. Picking the template seeds the box with
+  `claude-sonnet-5` alongside the prompt; typing `haiku` over it raises the
+  *Reset* affordance — the seed is registered as the row's baseline, which is the
+  `mountId`/`folder` treatment and not the prompt's — and the template's stored
+  model stays `claude-sonnet-5` while the field says `haiku`, so one run can be
+  moved off a template's model without editing it. *Reset* puts
+  `claude-sonnet-5` back. The save row reads `Keeps the task, the model, the
+  limits and how it behaves`, which is the sentence that used to promise the
+  opposite.
+
+  What was **not**: `docker compose`, unavailable in this container; any narrow
+  viewport; the sign-in path; and — as below — no template's model has reached a
+  real `--model` on a real spawn, because starting a run here starts a billed
+  agent.
 
 - **A per-run model reaching an actual spawn, and the run page's `Model`
   section.** The new-run form's Model field, what it posts, and the two rows the
