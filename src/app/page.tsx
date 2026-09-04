@@ -555,10 +555,6 @@ export default function Dashboard() {
   const liveTelemetryPlacement = hasContextControl
     ? "lg:order-last lg:col-span-2 xl:order-none xl:col-span-1"
     : "";
-  // Read off the windows rather than off the setting: the setting says we
-  // asked, this says we were answered.
-  const planPercentages =
-    s.session.fractionMetric === "plan" || s.weekly.fractionMetric === "plan";
   // The exhaustion projection is the one thing here that still needs a number
   // rather than a percentage — it extrapolates dollars and tokens per hour —
   // so it stays unavailable on a provider reading alone, and has to say so in
@@ -852,55 +848,6 @@ export default function Dashboard() {
                   whichever is highest.
                 </div>
               )}
-
-              {/* The last line of the card it is about, and it renders always.
-                  It spent a year as the fifth of five stacked notices, four of
-                  which appear only when something is wrong — so the one standing
-                  fact on the page was read as a fourth exception and skipped
-                  with them. It is a caveat about these two meters and about
-                  nothing else on the page, and this is where they are. */}
-              <div>
-                <strong className="font-medium text-ink">
-                  Costs and volumes here cover Claude Code only.
-                </strong>{" "}
-                Your 5-hour and weekly limits are shared with{" "}
-                <strong className="font-medium text-ink">Cowork</strong>, Claude
-                Desktop, web and mobile, none of which write anything locally — so
-                treat every dollar and token figure on this page as a{" "}
-                <em>floor</em> on your real consumption.
-                {/* Whether that blind spot also reaches the percentages is the
-                    whole difference this reading makes, and it decides which of
-                    the two pieces of advice below is the right one — reserving
-                    headroom against a figure that already counts every surface
-                    would subtract the same allowance twice. */}
-                {planPercentages ? (
-                  <>
-                    {" "}
-                    The <em>percentages</em> do not have that gap: they are
-                    Anthropic&rsquo;s own, for the whole account. Reserved
-                    headroom no longer applies to them and is not being
-                    subtracted.
-                  </>
-                ) : meta.reservedHeadroomFraction > 0 ? (
-                  <>
-                    {" "}
-                    The percentages have the same gap. You have reserved{" "}
-                    <strong className="font-medium text-ink">
-                      {fmtPct(meta.reservedHeadroomFraction)}
-                    </strong>{" "}
-                    of each window for it, so the ceilings above are reduced
-                    accordingly.
-                  </>
-                ) : (
-                  <>
-                    {" "}
-                    So do the percentages.{" "}
-                    <Link href="/settings">Reserve headroom</Link> if you use
-                    those too — otherwise a guard can permit a run while your real
-                    window is already close to full.
-                  </>
-                )}
-              </div>
             </div>
           </div>
         </Card>
@@ -924,8 +871,6 @@ export default function Dashboard() {
             pruningFrom={pruning.totalFrom}
             session={pruning.session}
             weekly={pruning.weekly}
-            pruner={pruning.pruner}
-            weeklyActivity={pruning.activity.weekly}
           />
         )}
       </div>
