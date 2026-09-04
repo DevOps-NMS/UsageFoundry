@@ -30,16 +30,26 @@ import { MAX_TEMPLATE_NAME } from "./apiTypes";
  * stops a value this build does not recognise from ever *widening* what a saved
  * template permits.
  *
+ * **The model is here, and it used to be refused.** This paragraph replaces that
+ * refusal rather than deleting it, because the reasoning is what a future reader
+ * needs and the premise is what changed. The refusal said `settings.defaultModel`
+ * already set the model globally and the run form did not offer one at all — so
+ * a saved model would be a second place to set one thing, and the second place
+ * is the one nobody remembers to check. The form offers one now, which turns
+ * that argument around: a template that cannot save a model silently drops half
+ * of what the form was set to, and the drift the refusal was written against
+ * arrives anyway, from the other direction. What makes the second place
+ * tolerable is `agents.ts`'s own ground for `agents.model`: **a model moves cost
+ * and never capability**. Every cost guard already covers whatever it selects,
+ * because the run's spend lands on its own `result` event and in its telemetry
+ * whatever model produced it, and the two routes to `--permission-mode` are
+ * still exactly two — this field reaches `--model` and nothing else. Precedence
+ * is stated once and applied once: the run's own model wins, then this, then
+ * `settings.defaultModel` at `createRun`, and an agent's model still only fills
+ * a gap where the run named none, because an explicit `--model` outranks it.
+ *
  * What a template deliberately does **not** hold:
  *
- * - **The model.** `settings.defaultModel` already sets it globally and the run
- *   form does not offer it at all. Two places to set one thing is how they
- *   drift, and the second place would be the one nobody remembers to check.
- *   `agentId` below is not a second one, though the singular flag brought it
- *   closer than it was: an agent's own `model` is now the *session's*, so what
- *   keeps it off this list is that an explicit `--model` outranks it — measured
- *   on the pin — which makes it a fallback for a run that named none rather than
- *   a second place to set one.
  * - **A last-used timestamp.** Ordering is by name, so the picker reads the way
  *   a person scans it. Most-recently-used would need a write on every
  *   instantiation and a `templateId` on the run wire that exists for nothing
@@ -70,11 +80,39 @@ export interface RunTemplate {
    * the guards get. The two server-side readers of a template deliberately do
    * not inherit it: `planProposal` takes the agent off the proposal and
    * `planNode` takes it off the node, each for its own stated reason, so a chat
-   * proposal made under this template gets its prompt and its guards from here
-   * and its agent from itself. Saying "it carries onto the run like the guards
-   * do" would be true of the form and false of both of those.
+   * proposal made under this template gets its prompt, its guards and its model
+   * from here and its agent from itself. Saying "it carries onto the run like
+   * the guards do" would be true of the form and false of both of those.
+   *
+   * `model` beside it is the deliberate asymmetry rather than an oversight, and
+   * it survives a proposal having gained one of its own. A proposal and a node
+   * each name their own agent, so inheriting one here would override an answer
+   * those surfaces already gave. A node still names no model, so this is the
+   * only answer it has; a chat proposal may name one, and *that* one wins —
+   * which is inheritance working rather than an exception to it, since null on
+   * the proposal is what falls through to here.
    */
   agentId: string | null;
+  /**
+   * The model a run from this template is started on, or null for none.
+   *
+   * Free-form, exactly as `agents.model` is: an alias (`sonnet`), a full id
+   * (`claude-opus-5`) and the literal `inherit` are all accepted by the CLI, so
+   * narrowing to a list this build knows would refuse the model that ships next
+   * week. An unrecognised one fails inside the CLI, which is where the set is
+   * actually known. **The triple narrowing `permissionMode` gets deliberately
+   * does not apply here**: that one exists because a permission mode reaches a
+   * flag deciding what a spawned process may *do*, so a value this build does
+   * not recognise must never widen it — this one reaches `--model`, which
+   * decides what a run costs and nothing else.
+   *
+   * Unlike `agentId`, this **is** inherited by the two server-side readers of a
+   * template: `planProposal` and `planNode` take it with the prompt and the
+   * guards. See the note on `agentId` above for the asymmetry and why it is one.
+   * `planProposal` reads it *second*, behind a model the chat named on the
+   * proposal itself; `planNode` has nothing above it to read.
+   */
+  model: string | null;
   budget: BudgetPolicy;
   createdAt: number;
   updatedAt: number;
@@ -207,6 +245,17 @@ export function normalizeTemplateInput(
     if (refusal) return { ok: false, error: refusal };
   }
 
+  // Blank is "this template names no model", the way every optional string here
+  // is, and whitespace is blank rather than a value — `--model "  "` is a spawn
+  // the CLI refuses where a template naming none is a run that starts. Not
+  // narrowed against a list of models, unlike the permission mode above and for
+  // the opposite reason: this reaches `--model`, which decides what a run costs
+  // and never what it may do, so refusing a value this build does not recognise
+  // would only refuse whatever ships next week.
+  const rawModel =
+    o.model === null || o.model === undefined ? "" : String(o.model).trim();
+  const model = rawModel === "" ? null : rawModel;
+
   return {
     ok: true,
     value: {
@@ -215,6 +264,7 @@ export function normalizeTemplateInput(
       mountId,
       folder,
       agentId,
+      model,
       // Matches `POST /api/runs`: anything but an explicit false asks for the
       // isolated checkout, which is the choice that cannot damage the
       // operator's own working tree.
@@ -234,6 +284,7 @@ interface TemplateRow {
   isolate: number;
   permission_mode: string;
   agent_id: string | null;
+  model: string | null;
   budget: string;
   created_at: number;
   updated_at: number;
@@ -280,6 +331,12 @@ export function rowToTemplate(row: TemplateRow): RunTemplate {
     // quietly started as nobody. A blank column and a blank string are the same
     // absence, which is the one thing collapsed.
     agentId: (row.agent_id ?? "").trim() === "" ? null : row.agent_id,
+    // Narrowed on read as well as on save, for the reason the permission mode
+    // is: a row outlives the build that wrote it. There is nothing to *narrow*
+    // here — a model this build has never heard of is still the right answer —
+    // so the whole of it is collapsing the two spellings of absence, a null
+    // column and a blank string, into the one the rest of the app reads.
+    model: row.model?.trim() || null,
     budget: normalizePolicy(rawBudget),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -291,7 +348,7 @@ export function rowToTemplate(row: TemplateRow): RunTemplate {
 /* ------------------------------------------------------------------ */
 
 const COLUMNS = `id, name, prompt, mount_id, folder, isolate, permission_mode,
-                 agent_id, budget, created_at, updated_at`;
+                 agent_id, model, budget, created_at, updated_at`;
 
 /**
  * Turn SQLite's unique-index violation into the sentence the form should show.
@@ -341,8 +398,8 @@ export function createTemplate(input: TemplateInput): RunTemplate {
       .prepare(
         `INSERT INTO run_templates
            (id, name, prompt, mount_id, folder, isolate, permission_mode,
-            agent_id, budget, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            agent_id, model, budget, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -353,6 +410,7 @@ export function createTemplate(input: TemplateInput): RunTemplate {
         input.isolate ? 1 : 0,
         input.permissionMode,
         input.agentId,
+        input.model,
         JSON.stringify(input.budget),
         now,
         now,
@@ -372,7 +430,8 @@ export function updateTemplate(
       .prepare(
         `UPDATE run_templates
             SET name = ?, prompt = ?, mount_id = ?, folder = ?, isolate = ?,
-                permission_mode = ?, agent_id = ?, budget = ?, updated_at = ?
+                permission_mode = ?, agent_id = ?, model = ?, budget = ?,
+                updated_at = ?
           WHERE id = ?`,
       )
       .run(
@@ -383,6 +442,7 @@ export function updateTemplate(
         input.isolate ? 1 : 0,
         input.permissionMode,
         input.agentId,
+        input.model,
         JSON.stringify(input.budget),
         Date.now(),
         id,

@@ -12,6 +12,7 @@ import {
   normalizeWorkflowInput,
   planEmission,
   planInstanceStep,
+  planNode,
   planLoopPass,
   planWorkflowProposal,
   summarizeProposedGraph,
@@ -32,6 +33,8 @@ import {
 } from "./workflows";
 import { topologicalOrder, type RunStatus } from "./orchestrator";
 import type { TurnResult } from "./chat";
+import type { RunGuards } from "./settings";
+import type { RunTemplate } from "./templates";
 
 /**
  * The three decisions a workflow makes with nothing spawned yet: whether the
@@ -1311,6 +1314,128 @@ function refused(raw: unknown, over: Partial<EmissionLimits> = {}): string {
   assert.ok(!res.ok, "expected a refusal");
   return res.reason;
 }
+
+/* ------------------------------------------------------------------ */
+/* One node becomes one run                                            */
+/* ------------------------------------------------------------------ */
+
+/** A run block as `planNode` takes one, fully typed. */
+const RUN_BLOCK: WorkflowNode = {
+  id: "b1",
+  name: "Fix the flake",
+  kind: "run",
+  templateId: "t1",
+  mountId: "work",
+  folder: "repo",
+  task: "Fix the flaky auth test.",
+  promptOverride: null,
+  agentId: null,
+  fanOut: null,
+  mergeStrategy: null,
+  mergeAutoResolve: false,
+  maxPasses: null,
+  maxLoopCostUSD: null,
+};
+
+/** A template as `planNode` takes one, with every field it reads different. */
+const BLOCK_TEMPLATE: RunTemplate = {
+  id: "t1",
+  name: "Careful",
+  prompt: "Work carefully and commit as you go.",
+  mountId: "elsewhere",
+  folder: "not/this",
+  isolate: true,
+  permissionMode: "acceptEdits",
+  agentId: null,
+  model: "claude-sonnet-5",
+  budget: {
+    maxIterations: 4,
+    maxDurationMinutes: 60,
+    maxRunCostUSD: 5,
+    maxRunTokens: null,
+    maxWeeklyFraction: null,
+    maxSessionFraction: null,
+    enforcement: "between-cycles",
+    continueAfterDone: false,
+  },
+  createdAt: 0,
+  updatedAt: 0,
+};
+
+/** The untemplated set, different from the template's in every field. */
+const BLOCK_DEFAULTS: RunGuards = {
+  permissionMode: "plan",
+  isolate: false,
+  budget: {
+    maxIterations: 1,
+    maxDurationMinutes: 30,
+    maxRunCostUSD: 2,
+    maxRunTokens: null,
+    maxWeeklyFraction: null,
+    maxSessionFraction: null,
+    enforcement: "live",
+    continueAfterDone: false,
+  },
+};
+
+/**
+ * What a block inherits from the template it names, and what it does not.
+ *
+ * The model is the one worth a test rather than a comment, because its failure
+ * is silent in the direction that costs money: a template that saved a model,
+ * named by a block, quietly starting every one of that block's runs on
+ * `settings.defaultModel` instead — the right task at a different price, with
+ * nothing on the instance page saying so. The guards beside it are asserted in
+ * the same case so a passing model assertion cannot be one read off the wrong
+ * record.
+ */
+describe("planNode — what a block takes from its template", () => {
+  it("runs a block on its template's model", () => {
+    const plan = planNode(RUN_BLOCK, BLOCK_TEMPLATE, BLOCK_DEFAULTS, null);
+    assert.ok(plan.ok);
+    assert.equal(plan.input.model, "claude-sonnet-5");
+    // Beside the two it already inherited, so the model is reaching the run by
+    // the same route rather than by a new one.
+    assert.equal(plan.input.permissionMode, "acceptEdits");
+    assert.ok(plan.input.prompt.startsWith("Work carefully and commit as you go."));
+  });
+
+  it("leaves the model to createRun when the template names none", () => {
+    const plan = planNode(
+      RUN_BLOCK,
+      { ...BLOCK_TEMPLATE, model: null },
+      BLOCK_DEFAULTS,
+      null,
+    );
+    assert.ok(plan.ok);
+    // Null rather than a default read here: `input.model ?? settings.defaultModel`
+    // in `createRun` is the one place that fallback is applied.
+    assert.equal(plan.input.model, null);
+  });
+
+  it("names no model for a block that names no template", () => {
+    // `settings.chatDefaultGuards` is a guard set and holds no model, so a
+    // block under the untemplated guards has nothing to inherit.
+    const plan = planNode(
+      { ...RUN_BLOCK, templateId: null },
+      null,
+      BLOCK_DEFAULTS,
+      null,
+    );
+    assert.ok(plan.ok);
+    assert.equal(plan.input.model, null);
+    assert.equal(plan.input.permissionMode, "plan");
+  });
+
+  it("still takes the mount and folder off the node, not the template", () => {
+    // The asymmetry the model does *not* join: a template edited months later
+    // must not move a saved block's run to another repository.
+    const plan = planNode(RUN_BLOCK, BLOCK_TEMPLATE, BLOCK_DEFAULTS, null);
+    assert.ok(plan.ok);
+    assert.equal(plan.input.mountId, "work");
+    assert.equal(plan.input.folder, "repo");
+  });
+});
 
 describe("planWorkflowProposal — a graph a model wrote becomes a saved workflow", () => {
   const proposal = (nodes: unknown[], edges: unknown[] = []) => ({

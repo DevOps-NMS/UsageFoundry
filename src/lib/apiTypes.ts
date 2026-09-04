@@ -1403,6 +1403,15 @@ export interface RunTemplateDTO {
    * without one — the run door refuses it by name either way.
    */
   agentId: string | null;
+  /**
+   * The model a run from this template is started on, or null for none.
+   *
+   * Free-form — an alias, a full id, or one released after this build — because
+   * a list this build knows would refuse next week's. It is a seed on the run
+   * form, where the field's own value is what starts the run, and it is
+   * *inherited* by `planProposal` and `planNode`, where there is no field.
+   */
+  model: string | null;
   budget: BudgetPolicyDTO;
   createdAt: number;
   updatedAt: number;
@@ -2766,6 +2775,20 @@ export interface ChatProposalDTO {
    * register. Approval refuses it by name rather than starting the run as none.
    */
   agentMissing: boolean;
+  /**
+   * The model the chat named for this run, or null where it named none.
+   *
+   * The proposal's own, never the template's resolved through it: a templated
+   * card's answer is the template's name, which the operator can go and read,
+   * and drawing a figure the proposal did not choose would be this card making
+   * a promise about a value that is free to change before the click. Null draws
+   * nothing at all — the run then uses the template's model, or the operator's
+   * default, which is what every card said before this field existed.
+   *
+   * Beside the agent rather than inside the guard mark, and for its reason: a
+   * model bounds nothing, so a figure under the shield would claim it did.
+   */
+  model: string | null;
   title: string;
   task: string;
   /** Where it would run, as a person reads it. Null means "as the template says". */

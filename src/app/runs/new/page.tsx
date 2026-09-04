@@ -46,7 +46,11 @@ import {
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
 import { isCommitChord } from "@/components/shell/shortcuts";
-import { type BudgetFields, budgetFromForm } from "./budgetPayload";
+import {
+  type BudgetFields,
+  budgetFromForm,
+  modelFromForm,
+} from "./budgetPayload";
 import { runFormProblems } from "./formProblems";
 
 /** Everything a template or an earlier run supplies to this form. */
@@ -63,6 +67,20 @@ interface FormSeed {
    * be this form guessing at an identity the run never recorded.
    */
   agentId: string | null;
+  /**
+   * The model the seed names, or null for "whatever Settings says".
+   *
+   * Both paths fill it now that a template carries one. It **seeds** the field,
+   * the treatment `mountId`/`folder` get and not the treatment the prompt and
+   * the guards get: what starts the run is whatever is in the box when Start is
+   * pressed, so a template's model can be overridden for one run without
+   * editing the template. Filling it is not the same act as pre-filling an
+   * empty form with `settings.defaultModel`, which this page deliberately does
+   * not do: a seed's model is a fact about that template or that run, and both
+   * *Start another like this* and picking a template promise the configuration
+   * that was saved rather than today's defaults.
+   */
+  model: string | null;
   budget: BudgetPolicyDTO;
 }
 
@@ -87,6 +105,12 @@ interface FormValues extends BudgetFields {
   permissionMode: string;
   /** `""` is "no agent" — the picker's own empty option, not a missing answer. */
   agentId: string;
+  /**
+   * `""` is "whatever Settings says", and it stays that at *creation* rather
+   * than at render: the field posts no `model` key when it is blank, so
+   * `createRun`'s `input.model ?? settings.defaultModel` is what resolves it.
+   */
+  model: string;
 }
 
 /**
@@ -104,6 +128,7 @@ type RowId =
   | "task"
   | "where"
   | "agent"
+  | "model"
   | "isolate"
   | "permission"
   | "cycles"
@@ -118,6 +143,7 @@ const ROW_FIELDS: Record<RowId, ReadonlyArray<keyof FormValues>> = {
   task: ["prompt"],
   where: ["mountId", "folder"],
   agent: ["agentId"],
+  model: ["model"],
   isolate: ["isolate"],
   permission: ["permissionMode"],
   cycles: ["iterationsCapped", "maxIterations"],
@@ -134,6 +160,7 @@ const ROW_LABEL: Record<RowId, string> = {
   task: "the task",
   where: "the workspace and folder",
   agent: "the agent",
+  model: "the model",
   isolate: "isolation",
   permission: "the permission mode",
   cycles: "the work-cycle limit",
@@ -170,6 +197,11 @@ const DEFAULT_VALUES: FormValues = {
   folder: "",
   prompt: "",
   agentId: "",
+  // Never seeded from `settings.defaultModel`. That default is shown as the
+  // input's placeholder instead, because a value sitting in the box is a value
+  // that gets posted — and a posted one is frozen onto `runs.model`, where it
+  // stops tracking the setting it was copied from.
+  model: "",
   isolate: true,
   // Overwritten by settings.defaultPermissionMode when it loads — and so is the
   // baseline, because a value this form filled in is not an override.
@@ -437,6 +469,7 @@ export default function NewRunPage() {
     DEFAULT_VALUES.permissionMode,
   );
   const [agentId, setAgentId] = useState(DEFAULT_VALUES.agentId);
+  const [model, setModel] = useState(DEFAULT_VALUES.model);
   const [iterationsCapped, setIterationsCapped] = useState(
     DEFAULT_VALUES.iterationsCapped,
   );
@@ -656,6 +689,13 @@ export default function NewRunPage() {
               // A run records the definition it was given, not the row it came
               // from, so there is no id to carry — see `FormSeed`.
               agentId: null,
+              // The model the run actually got, which is the point of the
+              // copy: a run started under a model that has since stopped being
+              // the default would otherwise come back as a differently-priced
+              // run wearing the same task. The same treatment the permission
+              // mode gets, and for the same reason — what is copied is the
+              // arrangement that produced the result, not today's settings.
+              model: run.model,
               budget: run.budget,
             },
             "run",
@@ -797,6 +837,7 @@ export default function NewRunPage() {
     isolate,
     permissionMode,
     agentId,
+    model,
     iterationsCapped,
     maxIterations,
     costLimited,
@@ -808,6 +849,17 @@ export default function NewRunPage() {
     enforcement,
     continueAfterDone,
   };
+
+  /**
+   * The model this run will actually be started with, as far as the page can
+   * tell, or null for Claude Code's own default.
+   *
+   * For display only — `modelFromForm` is what goes on the wire, and it sends
+   * nothing at all when the field is blank so that the fallback stays
+   * `createRun`'s to apply. Reading it here would post a default that was true
+   * when the page loaded rather than when Start was pressed.
+   */
+  const effectiveModel = model.trim() || (settings?.defaultModel ?? null);
 
   const rowChanged = (row: RowId) =>
     ROW_FIELDS[row].some((k) => current[k] !== baseline.values[k]);
@@ -832,6 +884,9 @@ export default function NewRunPage() {
         break;
       case "agent":
         setAgentId(b.agentId);
+        break;
+      case "model":
+        setModel(b.model);
         break;
       case "isolate":
         setIsolate(b.isolate);
@@ -950,6 +1005,11 @@ export default function NewRunPage() {
       isolate: seed.isolate,
       permissionMode: seed.permissionMode,
       agentId: seed.agentId ?? "",
+      // A seed that names no model blanks the field rather than leaving what
+      // is in it: every other answer here is replaced wholesale, and a model
+      // surviving a template that names none would be the one value on the form
+      // the operator could not see the provenance of.
+      model: seed.model ?? "",
       iterationsCapped: b.maxIterations !== null,
       maxIterations:
         b.maxIterations !== null ? String(b.maxIterations) : maxIterations,
@@ -978,6 +1038,7 @@ export default function NewRunPage() {
     setIsolate(next.isolate);
     setPermissionMode(next.permissionMode);
     setAgentId(next.agentId);
+    setModel(next.model);
     setIterationsCapped(next.iterationsCapped);
     setMaxIterations(next.maxIterations);
     setCostLimited(next.costLimited);
@@ -1060,6 +1121,12 @@ export default function NewRunPage() {
             // "" is the picker's own "no agent", and the column's null is the
             // same absence — collapsed here rather than stored as an empty id.
             agentId: agentId || null,
+            // An explicit null rather than `modelFromForm`'s absent key, which
+            // is the difference between the two doors: a blank field on a run
+            // means "let `createRun` fall back", where on a template it means
+            // "this template names no model" and has to overwrite whatever the
+            // row held before. `normalizeTemplateInput` trims it.
+            model: model || null,
             budget: budgetFromForm(current),
           }),
         },
@@ -1162,6 +1229,10 @@ export default function NewRunPage() {
           // starting a run that quietly is not the agent it was asked to be —
           // which under `--agent` is a run that would fail at the spawn.
           agentId: agentId || null,
+          // Spread, so a blank field contributes no `model` key at all and
+          // `createRun` reaches its `?? settings.defaultModel` — which is the
+          // whole of what "blank means whatever Settings says" is made of.
+          ...modelFromForm(model),
           budget: budgetFromForm(current),
         }),
       });
@@ -1423,13 +1494,14 @@ export default function NewRunPage() {
                     {/* An agent's model is the session's now, not a delegated
                         turn's — so it only reaches a run that has no model of
                         its own. An explicit --model outranks it, measured on
-                        the pin, and a run's model is settings.defaultModel. */}
+                        the pin, and a run's model is the field below, falling
+                        back to settings.defaultModel where that is blank. */}
                     {selectedAgent?.model && (
                       <span className="block">
                         Runs on{" "}
                         <span className="mono">{selectedAgent.model}</span>
-                        {settings?.defaultModel
-                          ? ", unless the default model in Settings wins"
+                        {effectiveModel
+                          ? ", unless this run's own model wins"
                           : ""}
                       </span>
                     )}
@@ -1474,6 +1546,48 @@ export default function NewRunPage() {
                 </div>
               </ListRow>
             )}
+
+            {/* Beside the agent and deliberately not in the card below, on that
+                row's own grounds: a model moves cost and never capability, so a
+                row in among the guards would claim it bounds something. Settings
+                puts its own model field beside its agent for the same reason.
+
+                Free-form rather than a picker, as the agents page is: an alias,
+                a full id, or a model released after this build are all valid,
+                and a list this build knows would refuse next week's. An
+                unrecognised value fails at the spawn, inside the CLI, which is
+                where the set is actually known. */}
+            <ListRow
+              htmlFor="model"
+              label="Model"
+              description={
+                <>
+                  An alias like <span className="mono">sonnet</span> or a full id
+                  like <span className="mono">claude-opus-5</span>. Blank takes
+                  the default in Settings, read when the run starts
+                </>
+              }
+            >
+              {mark("model")}
+              <div className="w-64">
+                <Input
+                  id="model"
+                  type="text"
+                  value={model}
+                  // What blank resolves to, shown rather than filled in: a value
+                  // in the box is a value that gets posted, and a posted one is
+                  // frozen onto `runs.model` where it stops following Settings.
+                  // Empty until the read lands, so it cannot say "Claude Code's
+                  // own" about an install that has named a default.
+                  placeholder={
+                    settings === null
+                      ? ""
+                      : (settings.defaultModel ?? "Claude Code's own default")
+                  }
+                  onChange={(e) => setModel(e.target.value)}
+                />
+              </div>
+            </ListRow>
           </ListGroup>
 
           {/* A stated fallback rather than a silent one: the form starts as no
@@ -2102,7 +2216,12 @@ export default function NewRunPage() {
                   ? "Write the task above first — the prompt is the part worth saving"
                   : nameTaken
                     ? `Replaces the template already called “${templateName.trim()}”`
-                    : "Keeps the task, the limits and how it behaves. Not the model — that stays a single global setting"
+                    : // The model is on this list now that the form offers one:
+                      // a template that saved everything but the model would
+                      // silently drop half of what was set above it. Picking
+                      // the template seeds the field rather than fixing it, so
+                      // it can still be changed for one run.
+                      "Keeps the task, the model, the limits and how it behaves"
               }
             >
               <div className="w-56">

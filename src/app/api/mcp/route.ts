@@ -264,9 +264,13 @@ const CHAT_TOOLS = [
     name: "save_template",
     description:
       "Save a reusable task prompt as a template, or rewrite an existing " +
-      "one's prompt. Prompt and name only: a new template takes the " +
-      "operator's default guard set and an existing one keeps its own guards, " +
-      "neither of which this tool can change.",
+      "one's. It writes three things and no fourth: the name, the prompt, and " +
+      "the model runs from it start on. The guards — budget, work-cycle " +
+      "limit, permission mode, whether the run gets its own checkout — are " +
+      "the operator's default set on a new template and are left exactly as " +
+      "they are on an existing one, and nothing on this tool can change them. " +
+      "The model is not one of them: it decides what a run costs and never " +
+      "what it may do.",
     inputSchema: {
       type: "object",
       properties: {
@@ -283,6 +287,19 @@ const CHAT_TOOLS = [
           description:
             "The standing instructions every run from this template starts " +
             "with. The per-run task is appended below it.",
+        },
+        model: {
+          type: "string",
+          description:
+            "The model runs from this template start on: an alias " +
+            "(\"sonnet\", \"opus\", \"haiku\"), a full id " +
+            "(\"claude-sonnet-5\"), or \"inherit\". Omit it and an existing " +
+            "template keeps whatever model it already names while a new one " +
+            "names none and falls back to the operator's default — which is " +
+            "the right answer unless the operator asked for a model or the " +
+            "work is plainly cheap or plainly hard. Send \"\" to clear one. " +
+            "It moves what runs from this template cost and never what they " +
+            "may do.",
         },
       },
       required: ["prompt"],
@@ -371,7 +388,9 @@ const CHAT_TOOLS = [
       "Propose one run for the operator to approve. This does NOT start " +
       "anything: it records a proposal that a person approves or rejects by " +
       "hand. Guards come from the template — or from the operator's default " +
-      "guard set when no template is named — and cannot be set here.",
+      "guard set when no template is named — and cannot be set here. The " +
+      "model can be, and is not one of them: it moves what the run costs and " +
+      "never what it may do.",
     inputSchema: {
       type: "object",
       properties: {
@@ -400,6 +419,21 @@ const CHAT_TOOLS = [
             "agent plainly fits the whole job. It changes who the run is and " +
             "never what the run may do — the guards are still the template's, " +
             "or the default set. Omit it for the ordinary run.",
+        },
+        model: {
+          type: "string",
+          description:
+            "The model this run is started on: an alias (\"sonnet\", " +
+            "\"opus\", \"haiku\"), a full id (\"claude-sonnet-5\"), or " +
+            "\"inherit\". Omit it and the run takes the template's model, or " +
+            "the operator's default when the template names none — which is " +
+            "the right answer unless the operator asked for a model or the " +
+            "job is plainly cheap or plainly hard. It moves what the run " +
+            "COSTS and never what it may do, so it is not a way to widen " +
+            "anything: the budget, the work-cycle limit, the permission mode " +
+            "and the isolation choice are unaffected and are still not " +
+            "settable here. Do not invent a name — an id this machine does " +
+            "not have is a run that fails when it starts.",
         },
         title: {
           type: "string",
@@ -1590,7 +1624,7 @@ function pendingLimitMessage(count: number): string {
 }
 
 /**
- * Write a template's name and prompt, and nothing else.
+ * Write a template's name, prompt and model, and nothing else.
  *
  * The guards are read off the existing row or off `chatGuards()` and written
  * straight back, so there is no argument on this tool that could move one. That
@@ -1598,6 +1632,13 @@ function pendingLimitMessage(count: number): string {
  * because a template the chat could arm would be a route to `--permission-mode`
  * that outlives the conversation — worse than a proposal, which at least gets
  * looked at once before it runs.
+ *
+ * The model is the third thing rather than a hole in that division, on the
+ * ground `agents.ts` states and `planProposal` restates: it moves cost rather
+ * than capability, and every cost guard already covers it because the run's
+ * spend lands on its own `result` event whatever model produced it. What it can
+ * outlive the conversation as is a template that costs more or less than it
+ * did, which is why the write is said in the thread rather than only returned.
  *
  * The write is recorded in the thread rather than left to the model to mention.
  * A proposal has a card; this has nothing, and rewriting a prompt the operator
@@ -1634,6 +1675,17 @@ function saveTemplate(args: Record<string, unknown>, chatId: string) {
     // a template names is one of the facts a person chose, and this tool may
     // write a prompt and nothing else.
     agentId: existing?.agentId ?? null,
+    // The one field on this object an argument may move, and the sentence
+    // above is why it can: a model decides what a run from this template
+    // costs, which every cost guard already covers, and never what it may do.
+    // Omitted leaves the row's own answer alone — this update replaces the
+    // template wholesale, so a forgotten field is one the chat silently
+    // deletes — and the empty string is a real answer that clears it, since
+    // `normalizeTemplateInput` reads blank as "names no model".
+    model:
+      args.model === undefined
+        ? (existing?.model ?? null)
+        : String(args.model).trim() || null,
     budget: guards.budget,
   };
 
@@ -1649,17 +1701,26 @@ function saveTemplate(args: Record<string, unknown>, chatId: string) {
       ? updateTemplate(existing.id, normalized.value)
       : createTemplate(normalized.value);
     if (!saved) return text("That template was deleted while saving.", true);
+    // Said in the thread as well as the prompt, because it is the second saved
+    // value this tool writes and the one the operator would otherwise meet on a
+    // bill: a template that quietly changed price weeks ago is a fact nothing
+    // else on the page reports. Said outside the guard sentence, which stays
+    // exactly as true — the same separation the proposal card makes.
+    const onModel = saved.model
+      ? ` It runs on ${saved.model}.`
+      : " It names no model, so runs from it use your default.";
     appendMessage(
       chatId,
       "system",
       existing
-        ? `The chat rewrote the prompt of the “${saved.name}” template. Its ` +
-          "guards are unchanged."
+        ? `The chat rewrote the prompt of the “${saved.name}” template.${onModel} ` +
+          "Its guards are unchanged."
         : `The chat saved a new template, “${saved.name}”, under your default ` +
-          "guard set.",
+          `guard set.${onModel}`,
     );
     return text(
       `${existing ? "Rewrote" : "Saved"} template “${saved.name}” (id ${saved.id}). ` +
+        `Model: ${saved.model ?? "none, so the operator's default applies"}. ` +
         `Its guards are unchanged: ${saved.permissionMode}, ` +
         `${saved.isolate ? "own checkout" : "the operator's own folder"}, ` +
         `${saved.budget.maxIterations ?? "no"} work-cycle limit.`,
@@ -1900,9 +1961,20 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
 
   const promptOverride = String(args.promptOverride ?? "").trim() || null;
 
+  // Not checked against a list of models, unlike the template and the agent
+  // above it, and for `run_templates.model`'s reason: this reaches `--model`,
+  // which decides what the run costs and nothing about what it may do, so
+  // refusing a name this build has not heard of would only refuse whatever
+  // ships next month. A name the CLI does not know fails at the spawn, loudly,
+  // where a guard this route let through would fail silently — which is the
+  // difference the whole division rests on. Blank is "named none": whitespace
+  // must not become `--model "  "`.
+  const model = String(args.model ?? "").trim() || null;
+
   const proposal = createProposal(chatId, {
     templateId: template ? template.id : null,
     agentId,
+    model,
     title,
     task,
     promptOverride,
@@ -1921,6 +1993,11 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
   const asAgent = agentId
     ? ` It runs as ${currentAgentKnowledge().get(agentId)?.name ?? "the agent you named"}.`
     : "";
+  // Outside the guard clause for the agent's reason, and said back at all
+  // because what a named model displaces is the operator's own default — so it
+  // is a fact the reply should carry rather than one the operator meets on a
+  // bill. Silent where none was named: the card draws no row there either.
+  const onModel = model ? ` It runs on ${model}.` : "";
   const after =
     dependsOn.length === 0
       ? ""
@@ -1932,7 +2009,7 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
           .join(" and ")} — say so, because both have to be approved in the ` +
         "same click unless the earlier one has already started.";
   return text(
-    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${asAgent}${after} ` +
+    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${asAgent}${onModel}${after} ` +
       "It is waiting for the operator to approve it; nothing is running.",
   );
 }

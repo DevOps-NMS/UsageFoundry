@@ -208,6 +208,9 @@ const template: RunTemplate = {
   isolate: true,
   permissionMode: "acceptEdits",
   agentId: null,
+  // Different from the agent's below, so a test that reads the template's model
+  // cannot be passing on one read off the agent.
+  model: "claude-sonnet-5",
   budget: {
     maxIterations: 4,
     maxDurationMinutes: 60,
@@ -246,6 +249,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     task: "Fix the flaky auth test in #412.",
     template_id: "tpl1",
     agent_id: null,
+    model: null,
     prompt_override: null,
     mount_id: null,
     folder: null,
@@ -262,6 +266,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     | "title"
     | "template_id"
     | "agent_id"
+    | "model"
     | "prompt_override"
     | "guards_json"
   >;
@@ -292,6 +297,109 @@ describe("planProposal", () => {
     assert.equal(plan.input.permissionMode, "acceptEdits");
     assert.equal(plan.input.isolate, true);
     assert.deepEqual(plan.input.budget, template.budget);
+  });
+
+  /**
+   * The whole precedence, pinned rung by rung: proposal, then template, then
+   * null for `createRun` to resolve.
+   *
+   * Worth pinning because every way of getting it wrong is silent and is a
+   * differently-priced run wearing the right task, which nothing on the page
+   * would report. The rung this one adds is the top: a model the chat named
+   * displaces the operator's own default, so a proposal whose model was read
+   * second — or not at all — spends the operator's money at a price the card
+   * stated and the run never used.
+   */
+  it("runs a proposal on the model the chat named, over the template's", () => {
+    const plan = planProposal(
+      proposal({ model: "claude-opus-5" }),
+      template,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, "claude-opus-5");
+    // The guards are still the template's, which is the whole point of the
+    // field being allowed at all: it moved the price and nothing else.
+    assert.equal(plan.input.permissionMode, "acceptEdits");
+    assert.equal(plan.input.isolate, true);
+  });
+
+  it("runs an untemplated proposal on the model the chat named", () => {
+    const plan = planProposal(
+      proposal({
+        template_id: null,
+        mount_id: "workspace",
+        folder: "acme/api",
+        model: "haiku",
+      }),
+      null,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, "haiku");
+  });
+
+  it("reads a blank model on the proposal as naming none", () => {
+    // Two rows arrive this way and neither means "the empty model": one
+    // written before the column existed, which reads `undefined` on an install
+    // that has not restarted, and one whose argument trimmed to nothing. Read
+    // as a value, both become `--model ""` — a spawn the CLI refuses — and
+    // neither would reach the template's own answer.
+    for (const blank of [undefined, "", "   "]) {
+      const plan = planProposal(
+        proposal({ model: blank as string | null }),
+        template,
+        defaults,
+        null,
+      );
+      assert.equal(plan.ok, true);
+      if (!plan.ok) return;
+      assert.equal(plan.input.model, "claude-sonnet-5");
+    }
+  });
+
+  it("runs a proposal on the template's model", () => {
+    const plan = planProposal(proposal(), template, defaults, null);
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, "claude-sonnet-5");
+  });
+
+  it("leaves the model to createRun when the template names none", () => {
+    // Null rather than a default read here: `createRun`'s
+    // `input.model ?? settings.defaultModel` is the one place that fallback is
+    // applied, and applying it twice is how the two stop agreeing.
+    const plan = planProposal(
+      proposal(),
+      { ...template, model: null },
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, null);
+  });
+
+  it("names no model for an untemplated proposal", () => {
+    // `settings.chatDefaultGuards` is a guard set and holds no model, so a
+    // proposal against no template has nothing to inherit and must not invent
+    // one from the guards it did inherit.
+    const plan = planProposal(
+      // Its own folder, because there is no template to take one from.
+      proposal({ template_id: null, mount_id: "workspace", folder: "acme/api" }),
+      null,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, null);
+    // The guards it did inherit, so "no model" is not "nothing was applied".
+    assert.equal(plan.input.permissionMode, "plan");
   });
 
   it("leads with the template's prompt and marks where the chat's task starts", () => {

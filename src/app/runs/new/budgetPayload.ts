@@ -24,10 +24,10 @@ export interface BudgetFields {
 /**
  * What the form's limits and window guards mean on the wire.
  *
- * Pure, and in a module of its own, because it is the one thing on that page
- * whose failure is both silent and expensive: a limit sent as the number still
- * sitting in a box the operator switched off starts an unattended agent under a
- * cap nobody set, and neither the page nor a typecheck would say so.
+ * Pure, and in a module of its own, because its failure is both silent and
+ * expensive: a limit sent as the number still sitting in a box the operator
+ * switched off starts an unattended agent under a cap nobody set, and neither
+ * the page nor a typecheck would say so.
  * `budgetPayload.test.ts` walks the matrix. Nothing here may import a component
  * or a browser API, or that test stops running — the note beside `Meter.tsx`'s
  * own import says why.
@@ -57,4 +57,31 @@ export function budgetFromForm(v: BudgetFields) {
     enforcement: v.enforcement,
     continueAfterDone: v.continueAfterDone,
   };
+}
+
+/**
+ * What the Model field means on the wire: a `model` key, or no key at all.
+ *
+ * Beside the budget rather than inside it, and that is the whole reason it is a
+ * separate function: a model moves cost and bounds nothing, so a `BudgetPolicy`
+ * that grew one would be claiming a guard where there is none — the same line
+ * the form draws by putting the field beside the agent instead of among the
+ * limits.
+ *
+ * An object to spread rather than a `string | null`, because *absent* is what a
+ * blank field has to send. `createRun` resolves a run's model as
+ * `input.model ?? settings.defaultModel`, so the fallback belongs to the run
+ * that named none — and the form shows today's default as the input's
+ * placeholder rather than pre-filling it, because a pre-filled value would be
+ * posted, frozen onto `runs.model`, and would then survive every later change
+ * to the setting it was copied from.
+ *
+ * Trimmed, and otherwise sent verbatim. An alias, a full id, or a name this
+ * build has never heard of are all valid — narrowing to a list would refuse the
+ * model that ships next week — but whitespace is not a value: `--model "  "` is
+ * a spawn the CLI refuses, where a blank field is a run that starts.
+ */
+export function modelFromForm(raw: string): { model?: string } {
+  const model = raw.trim();
+  return model ? { model } : {};
 }

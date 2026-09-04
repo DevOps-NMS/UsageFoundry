@@ -1,6 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { type BudgetFields, budgetFromForm } from "./budgetPayload";
+import {
+  type BudgetFields,
+  budgetFromForm,
+  modelFromForm,
+} from "./budgetPayload";
 
 /**
  * What `POST /api/runs` and `POST /api/templates` are handed, pinned field by
@@ -16,6 +20,12 @@ import { type BudgetFields, budgetFromForm } from "./budgetPayload";
  *
  * These assertions are the record of what the form sent before it was
  * restructured onto `LimitField`, not a description of what it sends now.
+ *
+ * The model is pinned here too, and fails a third way: the key's *absence* is
+ * what reaches `createRun`'s `input.model ?? settings.defaultModel`, so a form
+ * that sends the placeholder it shows — or a `model` key holding the spaces
+ * somebody typed — starts a run on a model nobody chose, with nothing on the
+ * page or in the types saying which one it was.
  */
 
 const ON: BudgetFields = {
@@ -100,10 +110,30 @@ test("enforcement and what happens after DONE are carried, never derived", () =>
   );
 });
 
+test("a blank model sends no key at all, not an empty one", () => {
+  // The absence is the message: `createRun` reads `input.model ??
+  // settings.defaultModel`, so the operator who never touched the field is the
+  // one asking for whatever Settings says — at the moment the run is created,
+  // not the moment the form was drawn.
+  assert.deepEqual(modelFromForm(""), {});
+  assert.equal("model" in modelFromForm("   "), false);
+});
+
+test("a typed model is trimmed and otherwise sent verbatim", () => {
+  assert.deepEqual(modelFromForm("claude-opus-5"), { model: "claude-opus-5" });
+  assert.deepEqual(modelFromForm("  sonnet\n"), { model: "sonnet" });
+  // Not narrowed to anything this build recognises: an alias, a full id and a
+  // model released after this code was written are all valid, and an
+  // unrecognised one is refused by the CLI, which is where the set is known.
+  assert.deepEqual(modelFromForm("claude-next-9"), { model: "claude-next-9" });
+});
+
 test("nothing else reaches the budget", () => {
-  // `permissionMode`, the agent and the folder go on the run's own payload and
-  // never through here — a budget that grew a permission mode would be a
-  // second route to `--permission-mode`, which the run door refuses to become.
+  // `permissionMode`, the agent, the model and the folder go on the run's own
+  // payload and never through here — a budget that grew a permission mode would
+  // be a second route to `--permission-mode`, which the run door refuses to
+  // become, and one that grew a model would put a figure that only moves cost
+  // in among the guards that bound it.
   assert.deepEqual(Object.keys(budgetFromForm(ON)).sort(), [
     "continueAfterDone",
     "enforcement",

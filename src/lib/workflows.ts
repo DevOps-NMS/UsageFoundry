@@ -450,6 +450,13 @@ export function planNode(
       // work rather than permission — see `WorkflowNode.agentId`. Frozen onto
       // the run by `createRun`, so the row keeps what it was started with.
       agent: node.agentId && agent ? agentDefinition(agent) : null,
+      // The template's, with the prompt and the guards and not with the agent
+      // above it. `planProposal` states the asymmetry and it holds here for the
+      // same reason: a node names its own agent and has no model of its own, so
+      // the template is where the question was asked. A node deliberately does
+      // not grow one — it names a template for the model exactly as it does for
+      // the guards, which is what `db.ts`'s "no model on a node" now means.
+      model: template?.model ?? null,
     },
   };
 }
@@ -515,6 +522,11 @@ export function planEmittedRun(
     isolate: guards.isolate,
     budget: guards.budget,
     agent,
+    // `planNode`'s inheritance, for its reason. A spec has no model on it and
+    // never will — which is what makes `RunSpec`'s "the block's own template
+    // already answered all of those" true of the model rather than an absence
+    // with nowhere to come from.
+    model: template?.model ?? null,
   };
 }
 
@@ -530,7 +542,12 @@ export function planEmittedRun(
  * after. There is no template id, no budget, no permission mode, no isolation
  * choice and no model, because the block's own template already answered all of
  * those and a spec that could answer them again would be a fifth route to
- * `--permission-mode` reached by a model with nobody reading the result.
+ * `--permission-mode` reached by a model with nobody reading the result. The
+ * model is the one of those the template answers rather than merely bounds, and
+ * it stays off this list for a narrower reason than the rest: it is not a route
+ * to anything — it moves cost and never capability — but a spec is written by a
+ * model, and a model choosing what it costs to run is a choice with nobody in
+ * the loop.
  *
  * The agent is not one of those and cannot become one. An agent is a description
  * and a prompt — the registry refuses a tool list at the door and has no column

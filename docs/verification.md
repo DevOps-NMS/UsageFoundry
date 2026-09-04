@@ -2322,6 +2322,160 @@ through before trusting this unattended:
 > narrow-viewport entries further down this list predate all four controls and
 > cover none of them.
 
+- **A template's model, from the save row to the two server-side readers.**
+  `run_templates.model`, the normalizer and row read in `templates.ts`, the
+  `POST`/`PUT` routes, the new-run form's save-and-seed, and the inheritance in
+  `planProposal`/`planNode`/`planEmittedRun` were added on 2026-09-04, on the
+  branch that added the per-run field in the entry below. What *is* checked:
+  `npm run typecheck` (exit 0), `npm test` (**2,136 tests / 326 suites / 0
+  failures**, up from 2,123/324), and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
+  npm run build` (exit 0).
+
+  **The migration was checked by hand against a database that already existed**,
+  which is the one thing here no unit test covers. A scratch `*.test.ts` — since
+  deleted — booted the app's own `db()` against a throwaway `DATA_DIR`, inserted
+  a `run_templates` row, then re-opened the file directly and ran `ALTER TABLE
+  run_templates DROP COLUMN model` to put it back in the state a build before
+  this change would have left. Re-opening through `db()` reported
+  `{"cid":11,"name":"model","type":"TEXT","notnull":0,"dflt_value":null,"pk":0}`
+  with the pre-existing row reading `{"id":"old","model":null}` — the column
+  lands, the row survives, and null is what an unbackfilled template says. A
+  third open reported exactly one `model` column, so the `addColumn` guard is
+  doing its job, and a write of `'sonnet'` read back unchanged.
+
+  The two inheriting readers were checked the way a bug fix is: deleting `model:
+  template?.model ?? null` from `planProposal` and `planNode` and re-running the
+  suite failed 6 tests across both, and restoring it returned the tree to green.
+
+  **The routes were driven against `next dev`** on a throwaway `DATA_DIR`, with
+  the install's own `UF_AUTH_TOKEN` presented as a `Bearer` header (an
+  unauthenticated `GET /api/templates` answered 401 in the same run, so the gate
+  was up). `POST` with `"  claude-sonnet-5  "` stored `"claude-sonnet-5"`;
+  `"   "`, an absent key and a literal JSON `null` each stored `null`; `GET` read
+  all four back unchanged. `PUT` with `claude-model-that-ships-next-week` stored
+  it verbatim, which is the absence of narrowing working rather than a value
+  slipping through, and `PUT` with `""` cleared it back to `null` — the overwrite
+  case that is why the form posts an explicit `null` rather than
+  `modelFromForm`'s absent key. Reading `run_templates` straight out of SQLite
+  afterwards agreed with the payloads.
+
+  **The form was driven in Chromium** at 1440px against the same server (auth
+  off, so nothing here passed through the sign-in path). Typing
+  `claude-sonnet-5` into *Model* and pressing *Save* stored that model on the
+  template. A reloaded form's *Model* box is **empty**, not pre-filled with
+  `settings.defaultModel`. Picking the template seeds the box with
+  `claude-sonnet-5` alongside the prompt; typing `haiku` over it raises the
+  *Reset* affordance — the seed is registered as the row's baseline, which is the
+  `mountId`/`folder` treatment and not the prompt's — and the template's stored
+  model stays `claude-sonnet-5` while the field says `haiku`, so one run can be
+  moved off a template's model without editing it. *Reset* puts
+  `claude-sonnet-5` back. The save row reads `Keeps the task, the model, the
+  limits and how it behaves`, which is the sentence that used to promise the
+  opposite.
+
+  What was **not**: `docker compose`, unavailable in this container; any narrow
+  viewport; the sign-in path; and — as below — no template's model has reached a
+  real `--model` on a real spawn, because starting a run here starts a billed
+  agent.
+
+- **A per-run model reaching an actual spawn, and the run page's `Model`
+  section.** The new-run form's Model field, what it posts, and the two rows the
+  inspector draws from `runs.model` were added on 2026-09-04. What *is* checked:
+  `npm run typecheck` (exit 0), `npm test` (**2,123 tests / 324 suites / 0
+  failures**, of which 2 are `modelFromForm` in `budgetPayload.test.ts` — that a
+  blank field contributes no `model` key at all, and that a typed one is trimmed
+  and otherwise sent verbatim), `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+  build` (exit 0), and both pages rendered against `next dev` in this container
+  on a throwaway `DATA_DIR`. `/runs/new`: the Model row draws in *What to work
+  on* under *Folder*, and its placeholder reads `Claude Code's own default` on an
+  install whose `settings.defaultModel` is unset. `/runs/[id]`: two rows planted
+  directly in that database — one with `model = 'claude-opus-5'` and an agent
+  whose own model is `claude-sonnet-5`, one with `model = NULL` and an agent with
+  none — draw a `Model` section in *How it was set up*, above `Agent` and two
+  regions below `Against its limits`, reading `This run` / `Its agent` as
+  `claude-opus-5` / `claude-sonnet-5` and `Claude Code's own default` / `the
+  run's own`. Planting a row rather than starting one is the whole of why that
+  could be checked at all: creating a run here starts a billed agent.
+
+  What was **not**: that a typed model reaches `--model` on a real spawn and that
+  the CLI runs on it — the fact the whole feature exists to deliver, and the one
+  thing no fixture can stand in for; the placeholder on an install that *has* a
+  default; the copied-run seed carrying `run.model`; `docker compose`; and any
+  narrow viewport.
+
+  One environment note for the next run that tries this: `next dev` has to be
+  given `NODE_ENV=development` explicitly. Under this container's
+  `NODE_ENV=production` every route answers 500 from the edge instrumentation
+  bundle with `Code generation from strings disallowed for this context` — the
+  same edge-bundle wall the knowledge-graph entry above records, except that
+  setting `NODE_ENV` is what gets past it, so the middleware is left in place and
+  loads. It was still run with `UF_ALLOW_NO_AUTH=1`, so what this checked is that
+  the edge bundle loads at all, not that the sign-in path works.
+
+- **The chat naming a model: `propose_run`, `save_template`, the proposal card.**
+  `chat_proposals.model`, the two tool schemas, `planProposal`'s precedence and
+  the row the card draws — the third of the three runs on this branch, and the
+  one where a model rather than a person writes the value. `npm run typecheck`
+  exits 0, `npm test` is 2,139 tests over 326 suites with 0 failures (three more
+  than before, all on `planProposal`), and `env -u
+  __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exits 0.
+
+  The three new tests were each run against the implementation they exist to
+  refuse rather than only against the one that ships, which is the only way a
+  precedence test says anything: the two that assert the proposal's model wins
+  fail on the `template?.model ?? null` read they replaced, and the one that
+  reads a blank model as naming none fails on a plain `proposal.model ??
+  template?.model ?? null` chain — where `""` or `"   "` off a trimmed argument
+  becomes `--model ""` and never reaches the template's own answer.
+
+  **The migration was checked against a database with rows in it, twice, not
+  only against a fresh one.** A scratch script under `/tmp` opened a data
+  directory through the app's own `db()`, seeded three `chat_proposals` rows a
+  real install would have — templated pending, untemplated pending carrying a
+  frozen `guards_json`, and one already approved against a run id — then
+  `ALTER TABLE chat_proposals DROP COLUMN model` to make the file look like one
+  the previous build wrote. Reopening it ran `migrate()` for real: the column
+  came back, all three rows were still there, every `model` was NULL, the frozen
+  guard blob was byte-identical and the approved row kept its status. A second
+  reopen changed nothing, which is the idempotence `migrate()` is written for.
+  The second shape is the one the `PROPOSAL_BASE_COLUMNS` warning is about: the
+  table was replaced by hand with the pre-`relaxProposalTemplate` schema —
+  `template_id TEXT NOT NULL`, none of the columns added since — with a row in
+  it, and the boot rebuilt it, kept the row, relaxed `template_id` and then
+  added `model` on top. That is the ordering the warning names, and it holds
+  because `model` was deliberately left out of `PROPOSAL_BASE_COLUMNS`; naming
+  it there would have made the rebuild's copy list mention a column the old
+  table does not have.
+
+  **Both tools were driven for real, in-process rather than over HTTP.** The
+  sandbox this run was executed in gives every shell its own network namespace,
+  so a `next dev` started in one call is unreachable from the next — measured,
+  `ECONNREFUSED` on `127.0.0.1` from both `curl` and `node` while the server
+  reported ready. So `/api/mcp`'s own `POST` was called directly with a
+  capability minted by `mintCapability({kind:"chat", …})` and a real
+  `Authorization: Bearer` header, against a seeded template naming
+  `claude-sonnet-5`. `propose_run` with `model: "haiku"` answered *"It runs on
+  haiku"* and wrote `haiku` to the row; the same call without the field wrote
+  null and said nothing about a model; `model: "   "` wrote null, so whitespace
+  never becomes a flag. `save_template` with `model: "opus"` set it and said so
+  in the thread and in the tool result, the same call with the field omitted
+  left `opus` alone across two further writes — the wholesale-replace trap the
+  `agentId` note warns about — and `model: ""` cleared it back to null with the
+  thread reading *"It names no model, so runs from it use your default."* Every
+  one of those results also carried *"Its guards are unchanged: acceptEdits, own
+  checkout, 3 work-cycle limit"*, which is the sentence the field had to not
+  disturb. `chatDTO` over the same rows then carried `model: "haiku"` on the
+  card that named one and `null` on the two that did not.
+
+  **Not checked by hand:** the card itself, rendered. The model row is verified
+  by type, by the DTO above and by the JSX being a plain truthy guard, but no
+  browser drew it, for the loopback reason above — `docker compose up --build`,
+  which is where a person would look at it, is also unavailable here. Nor was
+  the text a real orchestrator reads: whether a model given these two
+  descriptions names a sensible model, or reads "the model can be set" as
+  licence to argue for guards, is a question about a live turn and nothing here
+  answers it.
+
 - **The paged runs list and quick open's search, in a browser.** `/api/runs`
   now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
   drives all five from the Older runs fold, and quick open asks the route for
