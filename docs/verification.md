@@ -2322,6 +2322,32 @@ through before trusting this unattended:
 > narrow-viewport entries further down this list predate all four controls and
 > cover none of them.
 
+- **A per-run model reaching an actual spawn, and the run page's `Model`
+  section.** The new-run form's Model field, what it posts, and the two rows the
+  inspector draws from `runs.model` were added on 2026-09-04. What *is* checked:
+  `npm run typecheck` (exit 0), `npm test` (**2,123 tests / 324 suites / 0
+  failures**, of which 2 are `modelFromForm` in `budgetPayload.test.ts` — that a
+  blank field contributes no `model` key at all, and that a typed one is trimmed
+  and otherwise sent verbatim), `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+  build` (exit 0), and `/runs/new` rendered against `next dev` in this container
+  on a throwaway `DATA_DIR`: the Model row draws in *What to work on* under
+  *Folder*, and its placeholder reads `Claude Code's own default` on an install
+  whose `settings.defaultModel` is unset. What was **not**: that a typed model
+  reaches `--model` on a real spawn and that the CLI runs on it — the fact the
+  whole feature exists to deliver; the inspector's `Model` section, which needs a
+  run row and creating one starts a billed agent; the placeholder on an install
+  that *has* a default; the copied-run seed carrying `run.model`; `docker
+  compose`; and any narrow viewport.
+
+  One environment note for the next run that tries this: `next dev` has to be
+  given `NODE_ENV=development` explicitly. Under this container's
+  `NODE_ENV=production` every route answers 500 from the edge instrumentation
+  bundle with `Code generation from strings disallowed for this context` — the
+  same edge-bundle wall the knowledge-graph entry above records, except that
+  setting `NODE_ENV` is what gets past it, so the middleware is left in place and
+  loads. It was still run with `UF_ALLOW_NO_AUTH=1`, so what this checked is that
+  the edge bundle loads at all, not that the sign-in path works.
+
 - **The paged runs list and quick open's search, in a browser.** `/api/runs`
   now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
   drives all five from the Older runs fold, and quick open asks the route for

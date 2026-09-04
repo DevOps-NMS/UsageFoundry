@@ -320,7 +320,9 @@ Two ways, and the cheap one is worth knowing first.
 
 **Start another like this** — a link in the header of any run page. It opens the
 new-run form pre-filled from that run: the same task, the same workspace and
-folder, the same isolation, the same limits, the same permission mode. Nothing
+folder, the same isolation, the same limits, the same permission mode, and the
+same model — the one that run was actually started with, so a copy costs what
+the original did even if the default in Settings has moved since. Nothing
 happens until you press *Start run*, and nothing about the original run changes.
 This is not a resume — it is a new run that happens to be configured identically,
 which is what you want when last week's task comes round again but you would
@@ -341,8 +343,10 @@ guessing.
 
 Three things it does **not** do, each on purpose:
 
-- **It does not carry the model.** That is a single global setting
-  (Settings → *Model*), and a second place to set it is how the two drift.
+- **It does not carry the model.** The new-run form has its own *Model* field,
+  and Settings → *Model* is what a run that leaves it blank falls back to. A
+  saved copy would be a third answer to one question, read on a day you are
+  looking at the task rather than at the model, and that is how they drift.
 - **It does not apply a live-enforcement mode quietly.** There is deliberately no
   global "default enforcement", because one edit that turns *every* run into a
   cycle-killing run is a mistake with no undo. A template is a second way to
