@@ -271,6 +271,50 @@ describe("normalizeTemplateInput — the agent", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* The model a template names                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The field that reversed a documented refusal, so what it does and does not do
+ * is worth pinning rather than describing. It is *not* narrowed against a list
+ * — the failure of narrowing it would be silent in the expensive direction, a
+ * template refused for naming a model that exists — and it is not a route to
+ * anything a template may not reach, because it lands on `--model` and moves
+ * cost rather than capability.
+ */
+describe("normalizeTemplateInput — the model", () => {
+  it("names none by default, and reads blank as none", () => {
+    assert.equal(value(OK).model, null);
+    assert.equal(value({ ...OK, model: null }).model, null);
+    assert.equal(value({ ...OK, model: "" }).model, null);
+    // Whitespace is absence, not a value: `--model "  "` is a spawn the CLI
+    // refuses, where a template naming none is a run that starts.
+    assert.equal(value({ ...OK, model: "   " }).model, null);
+  });
+
+  it("keeps an alias, a full id and `inherit`, trimmed", () => {
+    assert.equal(value({ ...OK, model: "sonnet" }).model, "sonnet");
+    assert.equal(value({ ...OK, model: "claude-opus-5" }).model, "claude-opus-5");
+    assert.equal(value({ ...OK, model: "inherit" }).model, "inherit");
+    assert.equal(value({ ...OK, model: "  sonnet  " }).model, "sonnet");
+  });
+
+  it("accepts a model this build has never heard of, rather than refusing it", () => {
+    // The whole reason there is no list here. A narrowed field would refuse
+    // whatever ships next week, and the CLI is where the set is actually known.
+    assert.equal(
+      value({ ...OK, model: "claude-model-that-ships-next-week" }).model,
+      "claude-model-that-ships-next-week",
+    );
+  });
+
+  it("is idempotent through its own output", () => {
+    const once = value({ ...OK, model: " sonnet " });
+    assert.equal(value(once).model, "sonnet");
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* Reading a row back                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -283,6 +327,7 @@ const ROW = {
   isolate: 1,
   permission_mode: "acceptEdits",
   agent_id: null as string | null,
+  model: null as string | null,
   budget: JSON.stringify({ maxIterations: 5, maxDurationMinutes: 60 }),
   created_at: 1,
   updated_at: 2,
@@ -348,5 +393,27 @@ describe("rowToTemplate", () => {
    */
   it("keeps an agent id whose agent may be gone, rather than repairing it", () => {
     assert.equal(rowToTemplate({ ...ROW, agent_id: "deleted" }).agentId, "deleted");
+  });
+
+  it("reads a blank model column as no model", () => {
+    // The two spellings of absence a nullable TEXT column has. Every row that
+    // existed before this column reads the first one, and there is no backfill
+    // — a template that named nothing is not a template that named the default.
+    assert.equal(rowToTemplate(ROW).model, null);
+    assert.equal(rowToTemplate({ ...ROW, model: "" }).model, null);
+    assert.equal(rowToTemplate({ ...ROW, model: "   " }).model, null);
+  });
+
+  it("reads back a model this build has never heard of, unchanged", () => {
+    // The narrowing `permissionMode` gets above deliberately has no counterpart
+    // here: that value reaches a flag deciding what a process may do, so an
+    // unrecognised one degrades to `plan`. This one reaches `--model`, and
+    // degrading it would mean a row saved on a newer build silently starting
+    // runs on a different model than the one the operator picked.
+    assert.equal(
+      rowToTemplate({ ...ROW, model: "claude-model-that-ships-next-week" }).model,
+      "claude-model-that-ships-next-week",
+    );
+    assert.equal(rowToTemplate({ ...ROW, model: "  sonnet  " }).model, "sonnet");
   });
 });

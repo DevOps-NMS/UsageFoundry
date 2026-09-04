@@ -39,8 +39,9 @@ export const dynamic = "force-dynamic";
  * it is the next tier down from the `claude-opus-5` every recorded run here
  * used, `pricing.ts` has real rates for it, and an agent carrying
  * `"model": "sonnet"` selected with `--agent` is the whole of the mechanism —
- * no schema change, and deliberately no model column on `run_templates`, which
- * `templates.ts` refuses by name.
+ * no schema change, and no reading of `run_templates.model`, which is a real
+ * column now but names what a *template* would start rather than what any run
+ * on this figure actually ran on.
  *
  * A constant rather than a setting: nothing acts on this figure, one target is
  * enough to answer "is this worth trying", and a picker would be a control that

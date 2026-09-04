@@ -1358,6 +1358,15 @@ export interface RunTemplateDTO {
    * without one — the run door refuses it by name either way.
    */
   agentId: string | null;
+  /**
+   * The model a run from this template is started on, or null for none.
+   *
+   * Free-form — an alias, a full id, or one released after this build — because
+   * a list this build knows would refuse next week's. It is a seed on the run
+   * form, where the field's own value is what starts the run, and it is
+   * *inherited* by `planProposal` and `planNode`, where there is no field.
+   */
+  model: string | null;
   budget: BudgetPolicyDTO;
   createdAt: number;
   updatedAt: number;

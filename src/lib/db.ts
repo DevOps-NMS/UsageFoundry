@@ -274,10 +274,12 @@ function migrate(db: Database.Database) {
     -- the wire that could carry one.
     --
     -- model is nullable and means "keep whatever model the run already had".
-    -- It is the one field run_templates deliberately refuses to hold, and what
-    -- keeps it from being the second place to set the run's model is measured
-    -- rather than structural: an explicit --model outranks it on the pin, so it
-    -- fills a gap the run left.
+    -- run_templates now holds one too — see the addColumn note below and the
+    -- paragraph in templates.ts that replaced the refusal — so this is no
+    -- longer the only saved record that names one. What keeps *this* one from
+    -- being a place that overrides a choice somebody made is measured rather
+    -- than structural: an explicit --model outranks it on the pin, so it fills
+    -- a gap the run left, whether the run left it or its template did.
     CREATE TABLE IF NOT EXISTS agents (
       id          TEXT PRIMARY KEY,
       name        TEXT NOT NULL,
@@ -367,7 +369,11 @@ function migrate(db: Database.Database) {
     -- No guards, no permission mode, no model: a node names a template for
     -- those, or names none and takes settings.chatDefaultGuards. The reasoning
     -- is chat_proposals' above, and the rule is the same — the graph picks what
-    -- work to do, something a person wrote picks what an agent may do.
+    -- work to do, something a person wrote picks what an agent may do. The
+    -- model reads as one of those now rather than as an absence with nowhere to
+    -- come from: run_templates holds one, planNode takes it with the prompt and
+    -- the guards, and a node still names a template rather than carrying its
+    -- own.
     CREATE TABLE IF NOT EXISTS workflows (
       id         TEXT PRIMARY KEY,
       name       TEXT NOT NULL,
@@ -852,6 +858,20 @@ function migrate(db: Database.Database) {
   // A template naming an agent that has since gone is refused at both doors by
   // name — see `agentRefusal` — rather than falling back to none.
   addColumn(db, "run_templates", "agent_id", "TEXT");
+
+  // The model a run from this template is started on. Null means the template
+  // names none, which is every row that existed before this column and is the
+  // right answer for all of them — there is no backfill, because a template
+  // that named nothing is not a template that named today's default.
+  //
+  // This is the column `templates.ts` argued against holding for as long as the
+  // run form did not offer a model; the paragraph there records why the refusal
+  // stood and what changed. What keeps it from being a route to anything a
+  // template may not reach is that a model moves cost and never capability: it
+  // reaches `--model` and nothing else, every cost guard already covers it
+  // because the run's spend lands on its own `result` event whatever model
+  // produced it, and the two routes to `--permission-mode` are still two.
+  addColumn(db, "run_templates", "model", "TEXT");
 
   // The run whose branch this one carries on, so a second agent extends the
   // first one's commits instead of branching from the target again.
