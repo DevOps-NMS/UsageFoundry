@@ -5460,6 +5460,31 @@ through before trusting this unattended:
   looked at. A human should open `/` at 1920 and at about 1100, with a run in
   flight so the `working` badge and a moving figure are both present.
 
+- **The collapsed live-telemetry card, rendered at the width its cell actually
+  has — 2026-09-04.** The dashboard carried this card twice: the headline in the
+  top row, the same headline plus the per-run table in a band about 4,000px
+  down. The operator kept the top one and asked for the table to come with it,
+  and the question that could not be answered by reading the source is width —
+  the cell is `minmax(0,1fr)` from `xl`, **533px** at 1920, against the 1641px
+  the band had. `renderToStaticMarkup` through the built stylesheet in headless
+  Chromium, six runs of eight listed and the widest figure each column plausibly
+  holds (`$42.19`, 128 requests, a `needs-review` badge, `4h 0m ago`): at 533px
+  **all five columns fit** — nothing wrapped, nothing clipped, no sideways
+  scroll needed, and the totals line still beside the dollar figure rather than
+  under it. At a 390px viewport `Table stack`'s media query turns each run into a
+  labelled block and `ListView box="scrolling"` releases its overflow, so the
+  narrow case is the same one every other stacking table on the dashboard has.
+  No column was dropped or condensed to fit.
+
+  **Not yet verified by hand:** nothing here is the real page — this container
+  cannot read the database the dashboard draws from, so the card was rendered
+  alone against a stand-in for the cell rather than in the row. What is unproven
+  is the composition: the row's bottom edge under `items-start` now that the
+  middle card is six table rows taller than the 16rem tile beside it, and the
+  phone case, where a stacked six-run list now sits between the meters and
+  everything below them. A human should open `/` at 1920 and at about 390 with a
+  run in flight.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a

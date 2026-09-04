@@ -45,8 +45,9 @@ const HOLD_NOTICE_MS = 3 * 60_000;
  * produces a number that looks entirely ordinary.
  *
  * The caption used to say that on every render, on the same grounds
- * `LiveTelemetry`'s does. It no longer does: the operator read the standing
- * paragraph as wall-of-text and asked for it gone, so **nothing on this panel
+ * `LiveTelemetry`'s footnote did. Neither does now, and it went the same way in
+ * both places: the operator read the standing paragraph as wall-of-text and
+ * asked for it gone, so **nothing on this panel
  * states the separation to a sighted reader** — the sr-only prune table still
  * warns at its own figures, and this comment is the rest of the record. The
  * invariant is unchanged, only unsurfaced, and the arithmetic that breaks it

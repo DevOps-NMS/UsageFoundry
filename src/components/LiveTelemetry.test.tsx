@@ -1,21 +1,25 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import {
-  LiveTelemetry,
-  LiveTelemetryAside,
-  LiveTelemetryTotals,
-} from "./LiveTelemetry";
+import { LiveTelemetry } from "./LiveTelemetry";
 import type { TelemetryWindowDTO } from "../lib/apiTypes";
 
 /**
- * This card puts a first-party dollar figure on a page whose two headline
- * meters are transcript-derived, and the app's central rule is that the three
- * sources are never summed or mixed. Both failure modes here are silent: a card
- * that shows $2.43 beside a $166 meter with the separation sentence lost reads
- * as an addend, and a run list capped at six with nothing saying so reads as the
- * complete set — the same failure `selectForPatch` is tested against in
- * `diff.ts`. Neither throws, logs, or fails a typecheck.
+ * This card puts a first-party dollar figure in the top row of a page whose two
+ * headline meters are transcript-derived, and the app's central rule is that
+ * the three sources are never summed or mixed. Both failure modes here are
+ * silent: a card that shows $2.43 beside a $166 meter with nothing on it naming
+ * where the figure came from reads as an addend, and a run list capped at six
+ * with nothing saying so reads as the complete set — the same failure
+ * `selectForPatch` is tested against in `diff.ts`. Neither throws, logs, or
+ * fails a typecheck.
+ *
+ * The footnote that used to carry the first claim in three sentences is gone at
+ * the operator's request (2026-09-04), so what pins it here is the title: the
+ * two words `— first-party` are now the whole of the card's provenance, and the
+ * assertion below is the only thing standing between them and a later editor
+ * shortening the heading to `Live from runs`. `ContextOccupancy.tsx`'s module
+ * doc records the same trade, made the same way and one commit earlier.
  */
 
 const NOW = 1_700_000_000_000;
@@ -50,15 +54,16 @@ function windowOf(over: Partial<TelemetryWindowDTO> = {}): TelemetryWindowDTO {
   };
 }
 
-test("the figure never appears without the statement that it is not an addend", () => {
+test("the figure never appears without the source it came from", () => {
   const html = renderToStaticMarkup(
     <LiveTelemetry telemetry={windowOf()} now={NOW} />,
   );
   assert.match(html, /\$2\.43/, "the first-party total is the card's subject");
-  // The three claims that stop it being read as headroom.
-  assert.match(html, /Kept apart from the meters above rather than added to them/);
-  assert.match(html, /transcript-derived/);
-  assert.match(html, /budget guard reads the transcripts, never this/);
+  // A dollar amount in the top row with no provenance on it is read as one more
+  // reading of the window the card next to it meters. Pinned as one string
+  // rather than on the word alone: "first-party" has to be on the same line as
+  // the figure it qualifies to be read as qualifying it.
+  assert.match(html, /Live from runs — first-party/);
 });
 
 test("a capped list says how many runs it left out", () => {
@@ -90,11 +95,11 @@ test("a run with no matching row reads as unknown, not as a status", () => {
       now={NOW}
     />,
   );
-  // Anchored on the cell, not on the document: the card title and the closing
-  // footnote each carry an em-dash of their own, so a bare /—/ is satisfied
-  // before the table body is reached and a component that rendered an *empty*
-  // cell for a null status would pass it. The null branch is a bare dash as the
-  // only child of its `Td`, which is what `>—<` picks out.
+  // Anchored on the cell, not on the document: the card title carries an
+  // em-dash of its own, so a bare /—/ is satisfied before the table body is
+  // reached and a component that rendered an *empty* cell for a null status
+  // would pass it. The null branch is a bare dash as the only child of its
+  // `Td`, which is what `>—<` picks out.
   assert.match(html, />—</, "the unknown status is a dash in its own cell");
   // Against the badge markup rather than the bare word, so this does not start
   // depending on "running" being absent from unrelated copy on the card.
@@ -128,69 +133,6 @@ test("a run with a status wears it, so the dash is not what every cell says", ()
 test("nothing is described as working when no run is", () => {
   const html = renderToStaticMarkup(
     <LiveTelemetry telemetry={windowOf({ workingRunCount: 0 })} now={NOW} />,
-  );
-  assert.doesNotMatch(html, /working/);
-});
-
-/**
- * The aside is the same claim at the one place it is hardest to make. In the
- * band, a lost separation sentence leaves a first-party figure under its own
- * heading, four thousand pixels from a meter. Beside the meters it leaves one
- * against the other with nothing in between, which is the arithmetic the
- * provenance bands were built to make impossible — and the top of the page is
- * where a figure gets quoted from.
- */
-test("the aside's figure never appears without the statement that it is not an addend", () => {
-  const html = renderToStaticMarkup(
-    <LiveTelemetryAside telemetry={windowOf()} now={NOW} />,
-  );
-  assert.match(html, /\$2\.43/, "the first-party total is the card's subject");
-  // The same three claims the band's footnote carries, and the one word that
-  // has to differ: beside the meters, "above" would point at the page header.
-  assert.match(html, /Not added to the meters beside it/);
-  assert.match(html, /transcript-derived/);
-  assert.match(html, /budget guard reads the transcripts, never this/);
-});
-
-test("the aside names the source of its figure, not just the figure", () => {
-  const html = renderToStaticMarkup(
-    <LiveTelemetryAside telemetry={windowOf()} now={NOW} />,
-  );
-  // A dollar amount in the top row with no provenance on it is read as one more
-  // reading of the window the card next to it meters. The title is what says
-  // otherwise before the footnote is reached, so it is pinned separately.
-  assert.match(html, /Live from runs — first-party/);
-});
-
-test("both cards draw one reading of the totals, not two", () => {
-  const telemetry = windowOf();
-  // Rendered standalone and looked for verbatim inside each card: the assertion
-  // is not that the two agree today but that there is one component producing
-  // them, which is the only form of "cannot disagree" that survives an edit to
-  // either card. Re-inlining the figures into either one fails this.
-  const totals = renderToStaticMarkup(
-    <LiveTelemetryTotals telemetry={telemetry} now={NOW} />,
-  );
-  assert.ok(
-    renderToStaticMarkup(
-      <LiveTelemetry telemetry={telemetry} now={NOW} />,
-    ).includes(totals),
-    "the band draws the shared totals",
-  );
-  assert.ok(
-    renderToStaticMarkup(
-      <LiveTelemetryAside telemetry={telemetry} now={NOW} />,
-    ).includes(totals),
-    "and the aside draws the same ones",
-  );
-});
-
-test("nothing is described as working on the aside when no run is", () => {
-  const html = renderToStaticMarkup(
-    <LiveTelemetryAside
-      telemetry={windowOf({ workingRunCount: 0 })}
-      now={NOW}
-    />,
   );
   assert.doesNotMatch(html, /working/);
 });

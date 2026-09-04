@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { LiveTelemetry, LiveTelemetryAside } from "@/components/LiveTelemetry";
+import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { RecentBlocksCard } from "@/components/RecentBlocksCard";
 import { RepoSpendCard } from "@/components/RepoSpendCard";
@@ -905,14 +905,15 @@ export default function Dashboard() {
           </div>
         </Card>
 
-        {/* Gated on the same value as the band at the foot of the page, and it
-            has to be: `telemetryWindow` answers `null` when nothing reported,
-            so an absent card is "no run has reported" rather than "$0.00" —
-            and $0.00 at the top of the dashboard, beside the meters, is a
-            reading an operator would act on. */}
+        {/* Gated on the window itself, and it has to be: `telemetryWindow`
+            answers `null` when agent self-reporting is off or nothing has
+            reported, so an absent card is "no run has reported" rather than
+            "$0.00" — and $0.00 at the top of the dashboard, beside the meters,
+            is a reading an operator would act on. The gate is the setting and
+            what came back on it, never the guard figure. */}
         {telemetry && (
           <div className={liveTelemetryPlacement}>
-            <LiveTelemetryAside telemetry={telemetry} now={s.now} />
+            <LiveTelemetry telemetry={telemetry} now={s.now} />
           </div>
         )}
 
@@ -1561,26 +1562,6 @@ export default function Dashboard() {
               )}
             </Hint>
           </Card>
-        </SourceRegion>
-      )}
-
-      {/* A third reading, and the only one that moves *during* a work cycle:
-          a run reports its own spend when its cycle ends, so a run in flight
-          reads $0 on the band above until then. Absent entirely when agent
-          self-reporting is off or nothing has reported — the gate is the
-          setting, never the guard figure.
-
-          The headline also rides beside the meters now, on the pruning band's
-          terms: what is left here is the per-run derivation, and it stays here
-          rather than moving up with it, because a run-by-run table is what a
-          reader consults after the total tells them to and never at a glance.
-          The two figures are one `LiveTelemetryTotals`, so they cannot part. */}
-      {telemetry && (
-        <SourceRegion
-          heading="Live from runs"
-          statement="Claude Code’s own per-request cost, for agents this app spawned."
-        >
-          <LiveTelemetry telemetry={telemetry} now={s.now} />
         </SourceRegion>
       )}
     </>
