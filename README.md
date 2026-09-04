@@ -459,12 +459,13 @@ this app names an agent it is stated *beside* the guards and never among them.
 Being the run rather than a helper inside it makes that a larger fact than it
 was — it does not make it the kind of fact a guard row is.
 
-The one thing an agent holds that a template deliberately does not is a
-**model**, and it is the one field whose meaning changed when the flag did. It
-used to be the model a delegated sub-turn ran on; selected, it is the session's.
-What stops that being a second place to set the run's model is that an explicit
-`--model` outranks it, so it fills a gap you left rather than overruling a choice
-you made. It moves cost, not capability, and every cost guard already covers it.
+An agent also holds a **model**, and it is the one field whose meaning changed
+when the flag did. It used to be the model a delegated sub-turn ran on;
+selected, it is the session's. What stops that being a second place to set the
+run's model is that an explicit `--model` outranks it, so it fills a gap you
+left rather than overruling a choice you made. It moves cost, not capability,
+and every cost guard already covers it — which is the same ground a run template
+holds one on.
 
 ### Defining one
 

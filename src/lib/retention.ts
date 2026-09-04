@@ -95,8 +95,13 @@ export interface RetentionSweep {
    */
   decisions?: number;
   /**
-   * Rows removed from `context_compositions` — rows rather than readings, since
+   * Rows removed from the composition store — rows rather than readings, since
    * that is what a `DELETE` can report and a reading is several of them.
+   *
+   * Both of its tables under one figure: the bands in `context_compositions`
+   * and the newest reading's tree in `context_composition_children`. They expire
+   * on one clause and this answers how much the sweep took out, not which of the
+   * two it came from — a reader who needs the split has the tables.
    *
    * Absent on a sweep recorded before this table was swept at all, on
    * `samples`' reasoning.
@@ -214,13 +219,28 @@ export function sweepRunEvents(now = Date.now()): {
   // half of the same picture: it is drawn on the same axis, on the same card,
   // and a composition outliving the occupancy it apportions would be a stack of
   // bands with no total left to read them against.
-  const compositions = db()
-    .prepare(
-      `DELETE FROM context_compositions
-        WHERE ts < ?
-          AND run_id IN (SELECT id FROM runs WHERE status IN (${settled}))`,
-    )
-    .run(cutoff, ...TERMINAL_STATUSES).changes;
+  //
+  // The tree rides the series' for the same argument one level down. It is the
+  // newest reading's own children, and a tree outliving the reading it
+  // decomposes is a set of file paths apportioning a band that no longer
+  // exists — the defect the clause above already guards against, arriving from
+  // underneath. Its `ts` is the reading's, written by the same statement, so
+  // one cutoff settles both and neither can be left behind by the other.
+  const compositions =
+    db()
+      .prepare(
+        `DELETE FROM context_compositions
+          WHERE ts < ?
+            AND run_id IN (SELECT id FROM runs WHERE status IN (${settled}))`,
+      )
+      .run(cutoff, ...TERMINAL_STATUSES).changes +
+    db()
+      .prepare(
+        `DELETE FROM context_composition_children
+          WHERE ts < ?
+            AND run_id IN (SELECT id FROM runs WHERE status IN (${settled}))`,
+      )
+      .run(cutoff, ...TERMINAL_STATUSES).changes;
 
   return { events, telemetry, samples, decisions, compositions };
 }

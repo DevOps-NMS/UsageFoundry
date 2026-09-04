@@ -67,6 +67,10 @@ test("a template's own guards are spelled out by the same function", () => {
     isolate: true,
     permissionMode: "acceptEdits",
     agentId: null,
+    // Named, and deliberately absent from the sentence below: a model moves
+    // cost and bounds nothing, so a guard line that mentioned it would be
+    // claiming it guards something.
+    model: "claude-sonnet-5",
     budget: CAPPED,
     createdAt: 0,
     updatedAt: 0,

@@ -1969,6 +1969,22 @@ function Proposal({
                 </span>
               </span>
             )}
+            {/* The model the chat named, drawn for the reason an untemplated
+                card spells its guards out: values on a card are a promise, and
+                this one displaces the operator's own default. Outside the
+                guard mark and glyphless — `IconName` has nothing in it that
+                means a model, and the shield is the one mark ruled out, since
+                a model bounds strictly nothing.
+
+                Only where the proposal named one. Where it did not, the run
+                takes the template's model or the operator's default, and a row
+                asserting either would be this card promising a value it never
+                chose and cannot see change. */}
+            {proposal.model && (
+              <span className="min-w-0 max-w-full truncate">
+                on <span className="mono">{proposal.model}</span>
+              </span>
+            )}
             {/* The model rewrote the operator's own words, and this said so in
                 the same muted grey as the folder beside it — the least visible
                 fact on the card and the one a person is most likely to want

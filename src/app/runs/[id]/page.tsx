@@ -1526,29 +1526,53 @@ export default function RunDetail({
           </Region>
 
           {/* What was decided before it started, and the region is what keeps
-              `Agent` *beside* the guards rather than among them — two regions
-              away from `Against its limits`. A row inside that guard group
-              would claim the agent bounds something, and it bounds strictly
-              nothing: `--agent` sets the session's system prompt, and its model
+              `Model` and `Agent` *beside* the guards rather than among them —
+              two regions away from `Against its limits`. A row inside that
+              guard group would claim they bound something, and each bounds
+              strictly nothing: a model moves cost, which every guard in that
+              group already measures rather than being set by, and `--agent`
+              sets the session's system prompt, and its model
               where the run named none, while the permission mode, the isolation
               grant and the deny list are all argued at the spawn and untouched
               by it, which `orchestrator.test.ts` asserts again with one
               selected. Tidying it into the guards is a change nothing would
               report. */}
           <Region title="How it was set up">
-            {/* What it says is what was sent: the run's own frozen copy, so it
-                still names the agent after that agent has been renamed or
-                deleted. */}
+            {/* Both models in one place, in precedence order, because that is
+                the only order in which either row answers anything: the run's
+                own reaches `--model` and outranks the agent's, so the agent's
+                is what a run that named none falls back to. Off the run's row
+                rather than from Settings — a per-run choice read back from a
+                global setting is a choice nobody can check, and the two stopped
+                being the same answer the moment the form offered a model.
+
+                What it says is what was sent: `runs.model` was resolved once,
+                at creation, so this still names the model the run was started
+                with after Settings has moved on. Same for the agent, which is
+                the run's own frozen copy and still names it after that agent
+                has been renamed or deleted. */}
+            <Section title="Model">
+              <ListGroup>
+                <ListRow label="This run">
+                  <GuardValue>
+                    {run.model ?? "Claude Code's own default"}
+                  </GuardValue>
+                </ListRow>
+                {run.agent && (
+                  <ListRow label="Its agent">
+                    <GuardValue>
+                      {run.agent.model ?? "the run's own"}
+                    </GuardValue>
+                  </ListRow>
+                )}
+              </ListGroup>
+            </Section>
+
             {run.agent && (
               <Section title="Agent">
                 <ListGroup>
                   <ListRow label="Started as">
                     <GuardValue>{run.agent.name}</GuardValue>
-                  </ListRow>
-                  <ListRow label="Its model">
-                    <GuardValue>
-                      {run.agent.model ?? "the run's own"}
-                    </GuardValue>
                   </ListRow>
                 </ListGroup>
               </Section>

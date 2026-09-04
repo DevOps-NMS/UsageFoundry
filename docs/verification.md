@@ -2322,6 +2322,160 @@ through before trusting this unattended:
 > narrow-viewport entries further down this list predate all four controls and
 > cover none of them.
 
+- **A template's model, from the save row to the two server-side readers.**
+  `run_templates.model`, the normalizer and row read in `templates.ts`, the
+  `POST`/`PUT` routes, the new-run form's save-and-seed, and the inheritance in
+  `planProposal`/`planNode`/`planEmittedRun` were added on 2026-09-04, on the
+  branch that added the per-run field in the entry below. What *is* checked:
+  `npm run typecheck` (exit 0), `npm test` (**2,136 tests / 326 suites / 0
+  failures**, up from 2,123/324), and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
+  npm run build` (exit 0).
+
+  **The migration was checked by hand against a database that already existed**,
+  which is the one thing here no unit test covers. A scratch `*.test.ts` — since
+  deleted — booted the app's own `db()` against a throwaway `DATA_DIR`, inserted
+  a `run_templates` row, then re-opened the file directly and ran `ALTER TABLE
+  run_templates DROP COLUMN model` to put it back in the state a build before
+  this change would have left. Re-opening through `db()` reported
+  `{"cid":11,"name":"model","type":"TEXT","notnull":0,"dflt_value":null,"pk":0}`
+  with the pre-existing row reading `{"id":"old","model":null}` — the column
+  lands, the row survives, and null is what an unbackfilled template says. A
+  third open reported exactly one `model` column, so the `addColumn` guard is
+  doing its job, and a write of `'sonnet'` read back unchanged.
+
+  The two inheriting readers were checked the way a bug fix is: deleting `model:
+  template?.model ?? null` from `planProposal` and `planNode` and re-running the
+  suite failed 6 tests across both, and restoring it returned the tree to green.
+
+  **The routes were driven against `next dev`** on a throwaway `DATA_DIR`, with
+  the install's own `UF_AUTH_TOKEN` presented as a `Bearer` header (an
+  unauthenticated `GET /api/templates` answered 401 in the same run, so the gate
+  was up). `POST` with `"  claude-sonnet-5  "` stored `"claude-sonnet-5"`;
+  `"   "`, an absent key and a literal JSON `null` each stored `null`; `GET` read
+  all four back unchanged. `PUT` with `claude-model-that-ships-next-week` stored
+  it verbatim, which is the absence of narrowing working rather than a value
+  slipping through, and `PUT` with `""` cleared it back to `null` — the overwrite
+  case that is why the form posts an explicit `null` rather than
+  `modelFromForm`'s absent key. Reading `run_templates` straight out of SQLite
+  afterwards agreed with the payloads.
+
+  **The form was driven in Chromium** at 1440px against the same server (auth
+  off, so nothing here passed through the sign-in path). Typing
+  `claude-sonnet-5` into *Model* and pressing *Save* stored that model on the
+  template. A reloaded form's *Model* box is **empty**, not pre-filled with
+  `settings.defaultModel`. Picking the template seeds the box with
+  `claude-sonnet-5` alongside the prompt; typing `haiku` over it raises the
+  *Reset* affordance — the seed is registered as the row's baseline, which is the
+  `mountId`/`folder` treatment and not the prompt's — and the template's stored
+  model stays `claude-sonnet-5` while the field says `haiku`, so one run can be
+  moved off a template's model without editing it. *Reset* puts
+  `claude-sonnet-5` back. The save row reads `Keeps the task, the model, the
+  limits and how it behaves`, which is the sentence that used to promise the
+  opposite.
+
+  What was **not**: `docker compose`, unavailable in this container; any narrow
+  viewport; the sign-in path; and — as below — no template's model has reached a
+  real `--model` on a real spawn, because starting a run here starts a billed
+  agent.
+
+- **A per-run model reaching an actual spawn, and the run page's `Model`
+  section.** The new-run form's Model field, what it posts, and the two rows the
+  inspector draws from `runs.model` were added on 2026-09-04. What *is* checked:
+  `npm run typecheck` (exit 0), `npm test` (**2,123 tests / 324 suites / 0
+  failures**, of which 2 are `modelFromForm` in `budgetPayload.test.ts` — that a
+  blank field contributes no `model` key at all, and that a typed one is trimmed
+  and otherwise sent verbatim), `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+  build` (exit 0), and both pages rendered against `next dev` in this container
+  on a throwaway `DATA_DIR`. `/runs/new`: the Model row draws in *What to work
+  on* under *Folder*, and its placeholder reads `Claude Code's own default` on an
+  install whose `settings.defaultModel` is unset. `/runs/[id]`: two rows planted
+  directly in that database — one with `model = 'claude-opus-5'` and an agent
+  whose own model is `claude-sonnet-5`, one with `model = NULL` and an agent with
+  none — draw a `Model` section in *How it was set up*, above `Agent` and two
+  regions below `Against its limits`, reading `This run` / `Its agent` as
+  `claude-opus-5` / `claude-sonnet-5` and `Claude Code's own default` / `the
+  run's own`. Planting a row rather than starting one is the whole of why that
+  could be checked at all: creating a run here starts a billed agent.
+
+  What was **not**: that a typed model reaches `--model` on a real spawn and that
+  the CLI runs on it — the fact the whole feature exists to deliver, and the one
+  thing no fixture can stand in for; the placeholder on an install that *has* a
+  default; the copied-run seed carrying `run.model`; `docker compose`; and any
+  narrow viewport.
+
+  One environment note for the next run that tries this: `next dev` has to be
+  given `NODE_ENV=development` explicitly. Under this container's
+  `NODE_ENV=production` every route answers 500 from the edge instrumentation
+  bundle with `Code generation from strings disallowed for this context` — the
+  same edge-bundle wall the knowledge-graph entry above records, except that
+  setting `NODE_ENV` is what gets past it, so the middleware is left in place and
+  loads. It was still run with `UF_ALLOW_NO_AUTH=1`, so what this checked is that
+  the edge bundle loads at all, not that the sign-in path works.
+
+- **The chat naming a model: `propose_run`, `save_template`, the proposal card.**
+  `chat_proposals.model`, the two tool schemas, `planProposal`'s precedence and
+  the row the card draws — the third of the three runs on this branch, and the
+  one where a model rather than a person writes the value. `npm run typecheck`
+  exits 0, `npm test` is 2,139 tests over 326 suites with 0 failures (three more
+  than before, all on `planProposal`), and `env -u
+  __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exits 0.
+
+  The three new tests were each run against the implementation they exist to
+  refuse rather than only against the one that ships, which is the only way a
+  precedence test says anything: the two that assert the proposal's model wins
+  fail on the `template?.model ?? null` read they replaced, and the one that
+  reads a blank model as naming none fails on a plain `proposal.model ??
+  template?.model ?? null` chain — where `""` or `"   "` off a trimmed argument
+  becomes `--model ""` and never reaches the template's own answer.
+
+  **The migration was checked against a database with rows in it, twice, not
+  only against a fresh one.** A scratch script under `/tmp` opened a data
+  directory through the app's own `db()`, seeded three `chat_proposals` rows a
+  real install would have — templated pending, untemplated pending carrying a
+  frozen `guards_json`, and one already approved against a run id — then
+  `ALTER TABLE chat_proposals DROP COLUMN model` to make the file look like one
+  the previous build wrote. Reopening it ran `migrate()` for real: the column
+  came back, all three rows were still there, every `model` was NULL, the frozen
+  guard blob was byte-identical and the approved row kept its status. A second
+  reopen changed nothing, which is the idempotence `migrate()` is written for.
+  The second shape is the one the `PROPOSAL_BASE_COLUMNS` warning is about: the
+  table was replaced by hand with the pre-`relaxProposalTemplate` schema —
+  `template_id TEXT NOT NULL`, none of the columns added since — with a row in
+  it, and the boot rebuilt it, kept the row, relaxed `template_id` and then
+  added `model` on top. That is the ordering the warning names, and it holds
+  because `model` was deliberately left out of `PROPOSAL_BASE_COLUMNS`; naming
+  it there would have made the rebuild's copy list mention a column the old
+  table does not have.
+
+  **Both tools were driven for real, in-process rather than over HTTP.** The
+  sandbox this run was executed in gives every shell its own network namespace,
+  so a `next dev` started in one call is unreachable from the next — measured,
+  `ECONNREFUSED` on `127.0.0.1` from both `curl` and `node` while the server
+  reported ready. So `/api/mcp`'s own `POST` was called directly with a
+  capability minted by `mintCapability({kind:"chat", …})` and a real
+  `Authorization: Bearer` header, against a seeded template naming
+  `claude-sonnet-5`. `propose_run` with `model: "haiku"` answered *"It runs on
+  haiku"* and wrote `haiku` to the row; the same call without the field wrote
+  null and said nothing about a model; `model: "   "` wrote null, so whitespace
+  never becomes a flag. `save_template` with `model: "opus"` set it and said so
+  in the thread and in the tool result, the same call with the field omitted
+  left `opus` alone across two further writes — the wholesale-replace trap the
+  `agentId` note warns about — and `model: ""` cleared it back to null with the
+  thread reading *"It names no model, so runs from it use your default."* Every
+  one of those results also carried *"Its guards are unchanged: acceptEdits, own
+  checkout, 3 work-cycle limit"*, which is the sentence the field had to not
+  disturb. `chatDTO` over the same rows then carried `model: "haiku"` on the
+  card that named one and `null` on the two that did not.
+
+  **Not checked by hand:** the card itself, rendered. The model row is verified
+  by type, by the DTO above and by the JSX being a plain truthy guard, but no
+  browser drew it, for the loopback reason above — `docker compose up --build`,
+  which is where a person would look at it, is also unavailable here. Nor was
+  the text a real orchestrator reads: whether a model given these two
+  descriptions names a sensible model, or reads "the model can be set" as
+  licence to argue for guards, is a question about a live turn and nothing here
+  answers it.
+
 - **The paged runs list and quick open's search, in a browser.** `/api/runs`
   now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
   drives all five from the Older runs fold, and quick open asks the route for
@@ -5061,6 +5215,153 @@ through before trusting this unattended:
   last main-thread one — has been read out of both implementations rather than
   measured: no reading has been taken while a sub-agent was running, which is the
   one condition under which the two figures are supposed to disagree.
+
+- **The reading moved to depth 3, and what a depth-3 body actually looks like
+  (2026-09-04).** The entry above verified the app's argv at `--depth 1`; the
+  reading is now `--depth 3` and the body was measured rather than inferred from
+  the flag's help text. `python -m winnow context <transcript> --depth 3 --json`
+  was run at the pinned ref against the four largest transcripts on this machine
+  — 7.2 MB, 9.2 MB, 10.4 MB and 12.9 MB of JSONL — and returned **18 KB to 29 KB**
+  of JSON carrying **72 to 110 sub-nodes**, with **at most 29 children under any
+  one parent**. That settles the open question in `contextComposition`'s stdout
+  bound, which said in as many words that its 4 MB was written against a future
+  `--depth` and not against depth 1: **4 MB is still right**, with two orders of
+  headroom, because the body grows with the number of *distinct* artefacts and
+  not with the transcript. `COMPOSITION_CHILDREN_PER_NODE` at 64 therefore does
+  not fire on anything on this install and exists for the session that reads a
+  thousand files.
+
+  The node shape was read off those bodies rather than assumed. A node carries
+  `label`, `tokens`, `kind`, `share`, `note` and `children`, and **there is no
+  count field**: the repeat is welded onto the label by `context.py`'s
+  `decorate()` as the key, two spaces, `×`, and the count, from the third level
+  down and only where the count exceeds one — `Edit  ×43`, `$ grep  ×19`,
+  `/workspace/repo/src/lib/db.ts  ×3`. `splitRepeat` lifts it back off, anchored
+  on the whole label so it is a no-op on anything winnow did not decorate,
+  including `--by-path`'s `path  ×3 (Read ×2, Edit)` override, which this app
+  does not ask for.
+
+  Three things were then driven end to end against the real pinned winnow at
+  `/opt/winnow`, compiled, on a temporary `DATA_DIR`. `contextComposition` itself,
+  through `winnow safe run -- context <path> --depth 3 --json`, returned a full
+  three-level tree on a real 1.3 MB transcript. `recordComposition` followed by
+  `contextOccupancy` over two readings of the same body left **six** rows in
+  `context_composition_children` — the newest reading's tree and no other — with
+  the earlier reading's slices carrying empty `children`, the `×3` arriving as
+  `repeat: 3` beside a once-read file's `null`, and the same second-level key
+  (`Read results`) under two different provenances resolving to two subtrees
+  rather than one. And `sweepRunEvents` over a settled run past the horizon
+  reported **10** — four bands plus six tree rows — and emptied the children
+  table, which is the clause that stops a tree outliving the run it describes.
+
+  **Not yet verified by hand:** everything the entry above leaves open is still
+  open — no row has been written by the live tick, and the anchor divergence is
+  still read out of two implementations rather than measured. Two more are this
+  change's own. Nothing has drawn the tree: the detail view that renders these
+  children is the next run on this branch, so the path from
+  `context_composition_children` through `attachChildren` to a page is proven by
+  a compiled round-trip and by types, and not by looking at anything. And the
+  per-node cap has never fired on real output — the case that pins it feeds 200
+  synthetic children in shuffled order, because no transcript on this machine
+  produces more than 29 under one parent.
+
+- **2026-09-04 — picking a band on the Context panel and reading what is inside
+  it.** `src/components/ContextOccupancy.tsx`. The legend rows became
+  `aria-pressed` toggles sized to `--control-h`, the bands answer a pointer as a
+  shortcut, and the picked provenance draws the newest reading's subtree under
+  the chart: largest first at every level, each row with its tokens, its share of
+  its **own parent**, winnow's `kind` word and the repeat count where winnow
+  attached one. `npm run typecheck` clean; `npm test` 2131 pass / 0 fail over 324
+  suites, of which `ContextOccupancy.test.tsx` is 36 pass / 0 fail and six of
+  those are new; `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` clean, and
+  the emitted stylesheet was read for every class this added — `bg-selection`,
+  `hover:bg-fill-hover`, `active:bg-fill-active`, `min-h-[var(--control-h)]`,
+  `max-md:min-h-11`, `-mx-1.5`, `bg-inset`, `border-line` are all present, which
+  is the check `conventions.md` requires because Tailwind emits nothing at all
+  for a spelling it does not know.
+
+  **Operated in the real app, with a browser.** Not Docker — that is still the
+  gap below — but the whole stack under it: `npm run build`, then `npm start`
+  against a scratch `DATA_DIR` seeded with one run, 22 samples, a prune receipt
+  and two composition readings whose newest carries a two-level tree, then
+  Chromium driven over `/runs/<id>`. So this is the built bundle, the real route,
+  the real `/api/runs/[id]` handler, the real DTO and real client hydration in
+  the inspector column — everything a compose run would exercise except the
+  container and a real winnow. Twenty-four assertions, all passing:
+
+  - Six legend `<button>`s, none pressed and no detail region on arrival.
+  - A click opens exactly one; `aria-pressed` lands on the row that was clicked;
+    `aria-controls` appears and names a node that is in the document.
+  - The region says when the reading was taken, draws the artefact level under
+    the tool that read it, shows `seen 4×`, and contains no "other" row.
+  - The top level came back largest first — `Read`, `Bash`, `mcp__winnow__context`
+    — from rows SQLite handed over in insertion order.
+  - The shortfall is stated: "These rows come to 89% of tool traffic".
+  - Picking a second band swaps the region and leaves exactly one pressed; the
+    first row lets go. Picking the open one again closes it and the region goes.
+  - `prefix`, which has no children in that reading, says so rather than
+    rendering an empty list.
+  - Reached by **Tab**, a row matches `:focus-visible` and wears `2px solid` at
+    `2px` offset; **Space** opens it and **Enter** closes it; Tab walks all six
+    in order, top to bottom.
+  - No element in the region carries a class matching `danger|warn|success|critical`.
+
+  Five more against the same server, at 420px and with the run put back to
+  `running` so the page polls: a legend row measures exactly **44px** under `md`
+  and opens there; the page fetched three times in eleven seconds with a region
+  open; the region was still open afterwards and its rows were byte-identical, so
+  the poll neither closes it nor reorders it. That narrow pass is also where the
+  **live** wording was seen for real — "at the one reading taken 29m ago", older
+  than the "read just now" at the top of the card, which is the whole point of
+  the sentence.
+
+  Both themes were then photographed inside the real inspector column at 1440px.
+  Before that, a `renderToStaticMarkup` harness dressed in the built stylesheet
+  covered the states the seeded run cannot reach — the residual, a reading with
+  no tree at all, and both absences — and it is what found the one real defect in
+  this change: `DetailRows` built each row's children and never rendered them, so
+  the artefact level was silently missing while the tool level rendered perfectly
+  and nothing failed.
+
+  **A third environment trap, worth the next agent's time.** `npm run dev` cannot
+  compile CSS in this container: `@tailwindcss/postcss` dies with `EvalError:
+  Code generation from strings disallowed for this context`, `globals.css` then
+  fails webpack's parse at the first `@layer`, and every page answers 500. It is
+  not the repository and not a stale `.next` — `next build` is clean on the same
+  tree. Use `npm run build && npm start` to look at the app here. The server also
+  needs `UF_AUTH_TOKEN` set to a scratch value (never the one in `.env`) and the
+  browser sending `authorization: Bearer <it>`, since `middleware.ts` gates every
+  route; and each Bash call gets its own network namespace, so the server and
+  whatever talks to it must be started in **one** call.
+
+  **Not yet verified by hand:** `docker compose up --build`, which is the real
+  smoke test and is unavailable here. No **real winnow tree** has been drawn —
+  every label, `kind` and repeat count above was seeded by hand, so nothing
+  confirms that a genuine depth-3 body produces rows that fit 21rem; the longest
+  synthetic path wrapped mid-token, which is `break-words` behaving correctly and
+  may still read badly against real paths. The shortfall sentence has not been
+  seen against a store that actually dropped a tail, because
+  `COMPOSITION_CHILDREN_PER_NODE` has never fired on this install — the 89% above
+  comes from seeded children that do not sum, which exercises the sentence but
+  not the cap. The `aria-live` line has never been heard by a screen reader. And
+  the poll never delivered a *changed* composition under an open region: the
+  seeded readings are fixed, so what was proven is that eleven seconds of polling
+  leaves the rows alone, not what a genuinely new reading does to them.
+
+  **What a human should run.** `docker compose up --build`, open a run with
+  context pruning switched on that has been going long enough for a composition
+  reading — `/runs/<id>`, the **Context** card in the right-hand inspector, below
+  the sparkline and its stacked composition chart. Click a legend row, say **tool
+  traffic**: the row takes a blue wash and a panel opens directly under the six
+  rows, headed "Inside tool traffic, at the one reading taken *N*m ago — not the
+  span the bands cover", then one row per tool with its tokens and its percentage
+  of the band, each with its own files indented under it and `exact · seen 4×`
+  where a file was read more than once. Click the same row again: it closes.
+  Click a different row while it is open: the panel stays put and its contents
+  change, and only one row is washed. The one thing no seeded run could show:
+  leave a region open on a run that is still growing until a **new composition
+  reading** lands, and confirm the rows swap to it without the region closing and
+  without the age in its header going stale.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

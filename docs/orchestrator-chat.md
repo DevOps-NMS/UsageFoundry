@@ -31,6 +31,16 @@ run when the template nearly fits — the card marks it — and `save_template` 
 write a prompt back for reuse. Neither can touch a guard: a new template takes
 your default guard set, and an existing one keeps the guards it already has.
 
+**It can also pick the model, and that is not a guard.** A proposal can name one
+— `sonnet` for a mechanical sweep, `opus` for something hard — and
+`save_template` can write one onto a template. The card says which, whenever the
+chat named one, because what it displaces is your own default under Settings →
+Run defaults. It moves what the run *costs* and nothing about what it may do:
+the budget, the work-cycle limit, the permission mode and the checkout are still
+yours, and a run's spend lands in the same meters whatever model produced it.
+Where the chat names none, the run takes the template's model, then your
+default — which is what happened before it could name one at all.
+
 **The approval is per batch and there is no way to turn it off.** Not a setting
 left switched on by default — there is no setting. The route takes the explicit
 list of proposals the page was showing when you clicked, so anything the chat

@@ -184,6 +184,12 @@ function proposalDTO(
     // Truthy rather than `!== null`, `planProposal`'s rule: a row written before
     // the column existed reads as no agent rather than as a missing one.
     agentMissing: Boolean(p.agent_id) && (agent === null || !agent.usable),
+    // The row's own, and deliberately not `?? template?.model`: a card that
+    // spells a value out promises the run starts under it, and a template's
+    // model is a handle read live at the click for exactly the reason its
+    // guards are. Trimmed to null the way the plan reads it, so a row carrying
+    // whitespace draws no row rather than an empty one.
+    model: p.model?.trim() || null,
     title: p.title,
     task: p.task,
     folderLabel: folderLabel(p.mount_id, p.folder),

@@ -274,10 +274,12 @@ function migrate(db: Database.Database) {
     -- the wire that could carry one.
     --
     -- model is nullable and means "keep whatever model the run already had".
-    -- It is the one field run_templates deliberately refuses to hold, and what
-    -- keeps it from being the second place to set the run's model is measured
-    -- rather than structural: an explicit --model outranks it on the pin, so it
-    -- fills a gap the run left.
+    -- run_templates now holds one too — see the addColumn note below and the
+    -- paragraph in templates.ts that replaced the refusal — so this is no
+    -- longer the only saved record that names one. What keeps *this* one from
+    -- being a place that overrides a choice somebody made is measured rather
+    -- than structural: an explicit --model outranks it on the pin, so it fills
+    -- a gap the run left, whether the run left it or its template did.
     CREATE TABLE IF NOT EXISTS agents (
       id          TEXT PRIMARY KEY,
       name        TEXT NOT NULL,
@@ -367,7 +369,11 @@ function migrate(db: Database.Database) {
     -- No guards, no permission mode, no model: a node names a template for
     -- those, or names none and takes settings.chatDefaultGuards. The reasoning
     -- is chat_proposals' above, and the rule is the same — the graph picks what
-    -- work to do, something a person wrote picks what an agent may do.
+    -- work to do, something a person wrote picks what an agent may do. The
+    -- model reads as one of those now rather than as an absence with nowhere to
+    -- come from: run_templates holds one, planNode takes it with the prompt and
+    -- the guards, and a node still names a template rather than carrying its
+    -- own.
     CREATE TABLE IF NOT EXISTS workflows (
       id         TEXT PRIMARY KEY,
       name       TEXT NOT NULL,
@@ -853,6 +859,20 @@ function migrate(db: Database.Database) {
   // name — see `agentRefusal` — rather than falling back to none.
   addColumn(db, "run_templates", "agent_id", "TEXT");
 
+  // The model a run from this template is started on. Null means the template
+  // names none, which is every row that existed before this column and is the
+  // right answer for all of them — there is no backfill, because a template
+  // that named nothing is not a template that named today's default.
+  //
+  // This is the column `templates.ts` argued against holding for as long as the
+  // run form did not offer a model; the paragraph there records why the refusal
+  // stood and what changed. What keeps it from being a route to anything a
+  // template may not reach is that a model moves cost and never capability: it
+  // reaches `--model` and nothing else, every cost guard already covers it
+  // because the run's spend lands on its own `result` event whatever model
+  // produced it, and the two routes to `--permission-mode` are still two.
+  addColumn(db, "run_templates", "model", "TEXT");
+
   // The run whose branch this one carries on, so a second agent extends the
   // first one's commits instead of branching from the target again.
   //
@@ -944,6 +964,32 @@ function migrate(db: Database.Database) {
   // every guard on a proposed run still comes from `template_id` above or from
   // the untemplated guard set in settings.
   addColumn(db, "chat_proposals", "agent_id", "TEXT");
+
+  // The model a proposed run is started on, as the chat named it, or null for
+  // "whatever the template or the operator's default says".
+  //
+  // **This is not the rule below lapsing.** A model is not a guard, and the
+  // argument is `agents.ts`': it moves cost rather than capability, and every
+  // cost guard already covers it, since the run's spend lands on its own
+  // `result` event and in its telemetry whatever model produced it. So a model
+  // the chat names changes what the run costs and nothing about what it may do:
+  // the budget, the work-cycle limit, the permission mode and the isolation
+  // choice still come from `template_id` or from `settings.chatDefaultGuards`,
+  // and there is still no field on `propose_run` and no argument anywhere that
+  // reaches one. That is also why the run page refuses to draw a model inside
+  // the guard group — a value under the shield claims to bound something.
+  //
+  // Free-form, exactly as `run_templates.model` and `agents.model` are: an
+  // alias, a full id, or `inherit`. Narrowing it to a list this build knows
+  // would refuse the model that ships next month, and getting it wrong is a
+  // spawn that fails loudly rather than a run that quietly runs wider.
+  //
+  // Precedence is stated once and applied once, in `planProposal`: this, then
+  // the template's, then `settings.defaultModel` at `createRun`.
+  //
+  // Deliberately not in PROPOSAL_BASE_COLUMNS, for the reason `guards_json`
+  // below states — `relaxProposalTemplate` runs before every `addColumn` here.
+  addColumn(db, "chat_proposals", "model", "TEXT");
 
   // The untemplated guard set as it stood when the proposal was written, as
   // JSON, and null on a templated one — whose guards are a *handle* the
@@ -1470,6 +1516,60 @@ function migrate(db: Database.Database) {
       ON context_compositions(run_id, reading);
     CREATE INDEX IF NOT EXISTS idx_context_compositions_ts
       ON context_compositions(ts);
+  `);
+
+  // What one band is made of, for the newest reading of a run and no other.
+  //
+  // Its own table rather than more rows in the one above, and the separation is
+  // the bound rather than tidiness. The series is capped in *readings* because
+  // one reading is a handful of rows; putting the tree in it would make a
+  // reading a hundred rows or a thousand, and every figure derived from that
+  // table — the per-run cap's MAX(reading), the sweep's own row count, the
+  // three-second poll's scan — would go on meaning what it meant before while
+  // measuring something else.
+  //
+  // Replaced whole on every reading (recordComposition deletes the run's rows
+  // and rewrites them in the same transaction), which is what bounds this by
+  // *runs* rather than by readings × paths. Nothing caps how many distinct files
+  // a run may touch, so a tree per reading is the one dimension with no ceiling
+  // anywhere on this path. The trade is stated rather than hidden: this answers
+  // what is in the window now and cannot answer what was in an earlier reading.
+  //
+  // Two levels, matching COMPOSITION_DEPTH's 3: `parent` is empty on a node
+  // hanging straight off a provenance and carries the second level's own label
+  // on the artefact below it. A label rather than a row id because the rows are
+  // rewritten wholesale and an id would be a reference into a set that no longer
+  // exists by the time anything read it.
+  //
+  // `repeat_count` is winnow's ×N, lifted off the label rather than left in it
+  // — see `splitRepeat`. NULL where winnow attached none, which is every node
+  // above the artefact level and every artefact seen once. NULL is "winnow said
+  // nothing here"; a 1 in its place would be this app asserting a count winnow
+  // never printed.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS context_composition_children (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts         INTEGER NOT NULL,
+      -- Plain, on context_compositions' reasoning.
+      run_id     TEXT NOT NULL,
+      -- The reading these belong to, so a read can refuse a tree that describes
+      -- a stack it did not return rather than hang it on the wrong one.
+      reading    INTEGER NOT NULL,
+      -- The top-level band, which is context_compositions.label for this run
+      -- and reading. Not a foreign key: the two are written together and the
+      -- tree is deleted on its own schedule.
+      provenance TEXT NOT NULL,
+      -- The second level's label, or '' when this row is the second level.
+      parent     TEXT NOT NULL,
+      label      TEXT NOT NULL,
+      tokens     INTEGER NOT NULL,
+      kind       TEXT NOT NULL,
+      repeat_count INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_context_composition_children_run
+      ON context_composition_children(run_id, reading);
+    CREATE INDEX IF NOT EXISTS idx_context_composition_children_ts
+      ON context_composition_children(ts);
   `);
 
   // Every cycle boundary, pruned or not — and the `not` is the point.
