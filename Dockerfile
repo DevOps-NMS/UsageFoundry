@@ -392,7 +392,7 @@ RUN set -eux; \
 # from a specification. An unpinned rebuild would move that contract silently:
 # an unparsed line degrades to a log entry and a missing `result` event
 # understates spend, so the failure would not announce itself.
-ARG CLAUDE_CLI_VERSION=2.1.226
+ARG CLAUDE_CLI_VERSION=2.1.260
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" && npm cache clean --force
 
 # The third dependency of that same sandbox, and the only one that is not apt.

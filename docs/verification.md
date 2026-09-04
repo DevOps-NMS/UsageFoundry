@@ -1767,6 +1767,28 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The pin moved to 2.1.260 on 2026-09-04, and nothing on this page has been
+> re-measured against it.** Every figure above that names a CLI names 2.1.226,
+> because that is the build they were taken from: the `stream-json` shapes
+> `handleStreamLine` parses, the OTLP records `otlp.ts` reads, the compaction
+> threshold `readCompactions` keys on, the "Available agents" refusals in
+> `docs/agent/agents-and-templates.md`, and the sandbox answers in
+> `proposals/Sandboxing`. Those readings stand as history and are not claims
+> about what the image now installs. What **was** checked before the bump, and
+> it is the cheap half: every flag `buildArgs` and `sessionAgentArgs` emit is
+> still in `claude --help` on 2.1.260 — `--output-format`, `--verbose`,
+> `--model`, `--permission-mode`, `--forward-subagent-text`, `--agent`,
+> `--agents`, `--allowedTools`, `--disallowedTools`, `--append-system-prompt`,
+> `--plugin-dir`, `--add-dir`, `--resume`, `--max-budget-usd` — so a run will at
+> least start, the CLI rejecting an unknown flag being the one failure here that
+> is loud. What was **not**: a single container run on the new pin, so no
+> `stream-json` line, no `result` event, no OTLP record and no transcript
+> written by 2.1.260 has been through this app's parsers. Each of those degrades
+> *quietly* — an unparsed line becomes a log entry, a missing `result`
+> understates spend, an unrecognised compaction boundary is simply not seen — so
+> a green build here proves nothing about metering. The first
+> `docker compose up --build` with a real cycle is what settles it.
+
 > **The knowledge graph's orientation layer was driven in a browser; the
 > ten-step canvas click-list below still has not been run.** On 2026-09-02 the
 > `/knowledge` rework — the graph moved above the Notes table, a legend, a

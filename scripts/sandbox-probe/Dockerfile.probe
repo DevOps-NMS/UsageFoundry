@@ -65,11 +65,19 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ripgrep ca-certificates curl procps less
 
-# Same pin as `Dockerfile:194`, and it has to stay the same one. Every claim in
-# `proposals/Sandboxing/02x-option-cli-sandbox.md` was read out of *this* build's
-# strings, so a probe run against a different CLI measures a different program
-# and answers a different question. The build prints the version it got.
-ARG CLAUDE_CLI_VERSION=2.1.226
+# Same pin as the shipped `Dockerfile`, and it has to stay the same one. Every
+# claim in `proposals/Sandboxing/02x-option-cli-sandbox.md` was read out of
+# *this* build's strings, so a probe run against a different CLI measures a
+# different program and answers a different question. The build prints the
+# version it got.
+#
+# Those recorded answers were read from 2.1.226, and this pin has since moved
+# with the shipped image's. Following the invariant rather than freezing it is
+# deliberate: a probe of a CLI this repository no longer installs answers about
+# a program no run will ever start. Re-running the runbook now re-measures the
+# nine questions against 2.1.260 and the answers may differ from the ones
+# written down.
+ARG CLAUDE_CLI_VERSION=2.1.260
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" \
  && npm cache clean --force \
  && claude --version
