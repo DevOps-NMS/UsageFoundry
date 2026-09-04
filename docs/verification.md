@@ -2322,6 +2322,42 @@ through before trusting this unattended:
 > narrow-viewport entries further down this list predate all four controls and
 > cover none of them.
 
+- **A template's model, from the save row to the two server-side readers.**
+  `run_templates.model`, the normalizer and row read in `templates.ts`, the
+  `POST`/`PUT` routes, the new-run form's save-and-seed, and the inheritance in
+  `planProposal`/`planNode`/`planEmittedRun` were added on 2026-09-04, on the
+  branch that added the per-run field in the entry below. What *is* checked:
+  `npm run typecheck` (exit 0), `npm test` (**2,136 tests / 326 suites / 0
+  failures**, up from 2,123/324), and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
+  npm run build` (exit 0).
+
+  **The migration was checked by hand against a database that already existed**,
+  which is the one thing here no unit test covers. A scratch `*.test.ts` — since
+  deleted — booted the app's own `db()` against a throwaway `DATA_DIR`, inserted
+  a `run_templates` row, then re-opened the file directly and ran `ALTER TABLE
+  run_templates DROP COLUMN model` to put it back in the state a build before
+  this change would have left. Re-opening through `db()` reported
+  `{"cid":11,"name":"model","type":"TEXT","notnull":0,"dflt_value":null,"pk":0}`
+  with the pre-existing row reading `{"id":"old","model":null}` — the column
+  lands, the row survives, and null is what an unbackfilled template says. A
+  third open reported exactly one `model` column, so the `addColumn` guard is
+  doing its job, and a write of `'sonnet'` read back unchanged.
+
+  The two inheriting readers were checked the way a bug fix is: deleting `model:
+  template?.model ?? null` from `planProposal` and `planNode` and re-running the
+  suite failed 6 tests across both, and restoring it returned the tree to green.
+
+  What was **not**: anything through a live server. A `next dev` round trip of
+  `POST`/`PUT /api/templates` — saving a model, trimming it, clearing it back to
+  null, and reading the column out of SQLite afterwards — was written and not
+  run, so the routes are covered by types and by `normalizeTemplateInput`'s unit
+  tests and by nothing that has exercised the HTTP path. Nor was the form itself:
+  that pressing *Save* posts the Model field, that picking a template seeds it,
+  and that the seeded value can be overridden for one run are all reasoned from
+  the code and unverified in a browser. Nor `docker compose`, which is
+  unavailable in this container. And, as below, no template's model has reached a
+  real `--model` on a real spawn.
+
 - **A per-run model reaching an actual spawn, and the run page's `Model`
   section.** The new-run form's Model field, what it posts, and the two rows the
   inspector draws from `runs.model` were added on 2026-09-04. What *is* checked:

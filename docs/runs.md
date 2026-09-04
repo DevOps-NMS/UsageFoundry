@@ -334,19 +334,24 @@ is currently holding under a name. Loading a template fills in every field and
 starts nothing; you can edit anything before you run it, and editing the form
 does not write back to the template.
 
-What a template holds is the task, the limits, how it behaves, and — optionally —
-the folder. *Remember the workspace and folder* is a switch on the save row,
-because both answers are right for different tasks: "update the changelog for
-this project" wants a folder recorded, "run the test suite and fix what fails"
-wants to be asked. A template with no folder leaves the picker alone rather than
-guessing.
+What a template holds is the task, the model, the limits, how it behaves, and —
+optionally — the folder. *Remember the workspace and folder* is a switch on the
+save row, because both answers are right for different tasks: "update the
+changelog for this project" wants a folder recorded, "run the test suite and fix
+what fails" wants to be asked. A template with no folder leaves the picker alone
+rather than guessing.
 
-Three things it does **not** do, each on purpose:
+The **model** is a seed rather than a fixture. Loading a template fills the
+*Model* field, and what starts the run is whatever is in that field when you
+press *Start run* — so you can run one template on a cheaper model once without
+editing the template. A template that leaves it blank names no model, and a run
+from it falls back to Settings → *Model* the way any other blank field does.
+Where there is no form in front of you it is inherited outright: a chat proposal
+made against a template, and a workflow block naming one, both run on that
+template's model. It moves what a run costs and nothing about what it may do.
 
-- **It does not carry the model.** The new-run form has its own *Model* field,
-  and Settings → *Model* is what a run that leaves it blank falls back to. A
-  saved copy would be a third answer to one question, read on a day you are
-  looking at the task rather than at the model, and that is how they drift.
+Two things it does **not** do, each on purpose:
+
 - **It does not apply a live-enforcement mode quietly.** There is deliberately no
   global "default enforcement", because one edit that turns *every* run into a
   cycle-killing run is a mistake with no undo. A template is a second way to
