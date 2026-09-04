@@ -99,8 +99,11 @@ export interface WorkflowNode {
    * **It is the node's own and is never inherited from its template**, which is
    * the mount and folder's rule rather than the prompt's. What decides it is
    * what a template answers *here*: the run form applies one as a seed for every
-   * field, where a node reads one for exactly two things — its guards, and the
-   * standing instructions `promptOverride` replaces. It supplies neither the
+   * field, where a node reads one for exactly three things — its guards, the
+   * standing instructions `promptOverride` replaces, and the model. The model
+   * joined that list when `run_templates` grew one, and it belongs there on the
+   * ground that keeps it off this field: it moves cost and never capability, and
+   * a node has no model of its own for it to override. It supplies neither the
    * mount nor the folder, for the stated reason that a template edited months
    * later would silently move a saved block's run to another repository, and an
    * agent is the same shape of change one field over: it decides who does the

@@ -208,6 +208,9 @@ const template: RunTemplate = {
   isolate: true,
   permissionMode: "acceptEdits",
   agentId: null,
+  // Different from the agent's below, so a test that reads the template's model
+  // cannot be passing on one read off the agent.
+  model: "claude-sonnet-5",
   budget: {
     maxIterations: 4,
     maxDurationMinutes: 60,
@@ -292,6 +295,54 @@ describe("planProposal", () => {
     assert.equal(plan.input.permissionMode, "acceptEdits");
     assert.equal(plan.input.isolate, true);
     assert.deepEqual(plan.input.budget, template.budget);
+  });
+
+  /**
+   * The model gets the prompt-and-guards treatment rather than the agent's.
+   *
+   * Worth pinning because the alternative is silent and is what the field was
+   * added to end: a template that saved a model, applied by a chat proposal,
+   * quietly starting on `settings.defaultModel` instead — a differently-priced
+   * run wearing the right task, which nothing on the page would report.
+   */
+  it("runs a proposal on the template's model", () => {
+    const plan = planProposal(proposal(), template, defaults, null);
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, "claude-sonnet-5");
+  });
+
+  it("leaves the model to createRun when the template names none", () => {
+    // Null rather than a default read here: `createRun`'s
+    // `input.model ?? settings.defaultModel` is the one place that fallback is
+    // applied, and applying it twice is how the two stop agreeing.
+    const plan = planProposal(
+      proposal(),
+      { ...template, model: null },
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, null);
+  });
+
+  it("names no model for an untemplated proposal", () => {
+    // `settings.chatDefaultGuards` is a guard set and holds no model, so a
+    // proposal against no template has nothing to inherit and must not invent
+    // one from the guards it did inherit.
+    const plan = planProposal(
+      // Its own folder, because there is no template to take one from.
+      proposal({ template_id: null, mount_id: "workspace", folder: "acme/api" }),
+      null,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.model, null);
+    // The guards it did inherit, so "no model" is not "nothing was applied".
+    assert.equal(plan.input.permissionMode, "plan");
   });
 
   it("leads with the template's prompt and marks where the chat's task starts", () => {

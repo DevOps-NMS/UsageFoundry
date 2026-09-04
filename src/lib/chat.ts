@@ -883,6 +883,13 @@ export function proposalGuards(
  * *is* the half of a run a model may write. A proposal can therefore replace
  * the template's prompt for one run, and the card says when it did.
  *
+ * **The template's model is inherited here, with the prompt and the guards.**
+ * That is not a third thing a proposal decides — a proposal has no model on it
+ * — it is the template's own answer reaching the one surface that reads a
+ * template without a form in front of it. Safe on `templates.ts`'s ground: a
+ * model moves cost and never capability, so it cannot widen what this run may
+ * do, and a template naming none still falls back at `createRun`.
+ *
  * **The agent is the second exception and is not one either.** A saved agent is
  * a description and a prompt: the registry refuses a tool list at the door and
  * has no column for a permission mode, so naming one is the same class of act as
@@ -994,6 +1001,17 @@ export function planProposal(
       // the row, so an agent deleted after the click cannot reach a later cycle
       // of the run this starts.
       agent: proposal.agent_id && agent ? agentDefinition(agent) : null,
+      // The template's, with the prompt and the guards rather than with the
+      // agent above it — and the asymmetry is deliberate. A proposal names its
+      // own agent, so inheriting the template's would override an answer this
+      // surface already gave; a proposal has no model at all, so the template
+      // is the only place the question was asked, and a template's model that
+      // reached only the run form would be a saved value the chat silently
+      // dropped. Safe to inherit for the reason `templates.ts` states: a model
+      // moves cost and never capability, and every guard below still comes from
+      // the template or from settings. Null keeps `createRun`'s
+      // `?? settings.defaultModel` as the fallback for a template naming none.
+      model: template?.model ?? null,
     },
   };
 }
