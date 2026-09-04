@@ -1472,6 +1472,60 @@ function migrate(db: Database.Database) {
       ON context_compositions(ts);
   `);
 
+  // What one band is made of, for the newest reading of a run and no other.
+  //
+  // Its own table rather than more rows in the one above, and the separation is
+  // the bound rather than tidiness. The series is capped in *readings* because
+  // one reading is a handful of rows; putting the tree in it would make a
+  // reading a hundred rows or a thousand, and every figure derived from that
+  // table — the per-run cap's MAX(reading), the sweep's own row count, the
+  // three-second poll's scan — would go on meaning what it meant before while
+  // measuring something else.
+  //
+  // Replaced whole on every reading (recordComposition deletes the run's rows
+  // and rewrites them in the same transaction), which is what bounds this by
+  // *runs* rather than by readings × paths. Nothing caps how many distinct files
+  // a run may touch, so a tree per reading is the one dimension with no ceiling
+  // anywhere on this path. The trade is stated rather than hidden: this answers
+  // what is in the window now and cannot answer what was in an earlier reading.
+  //
+  // Two levels, matching COMPOSITION_DEPTH's 3: `parent` is empty on a node
+  // hanging straight off a provenance and carries the second level's own label
+  // on the artefact below it. A label rather than a row id because the rows are
+  // rewritten wholesale and an id would be a reference into a set that no longer
+  // exists by the time anything read it.
+  //
+  // `repeat_count` is winnow's ×N, lifted off the label rather than left in it
+  // — see `splitRepeat`. NULL where winnow attached none, which is every node
+  // above the artefact level and every artefact seen once. NULL is "winnow said
+  // nothing here"; a 1 in its place would be this app asserting a count winnow
+  // never printed.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS context_composition_children (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts         INTEGER NOT NULL,
+      -- Plain, on context_compositions' reasoning.
+      run_id     TEXT NOT NULL,
+      -- The reading these belong to, so a read can refuse a tree that describes
+      -- a stack it did not return rather than hang it on the wrong one.
+      reading    INTEGER NOT NULL,
+      -- The top-level band, which is context_compositions.label for this run
+      -- and reading. Not a foreign key: the two are written together and the
+      -- tree is deleted on its own schedule.
+      provenance TEXT NOT NULL,
+      -- The second level's label, or '' when this row is the second level.
+      parent     TEXT NOT NULL,
+      label      TEXT NOT NULL,
+      tokens     INTEGER NOT NULL,
+      kind       TEXT NOT NULL,
+      repeat_count INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_context_composition_children_run
+      ON context_composition_children(run_id, reading);
+    CREATE INDEX IF NOT EXISTS idx_context_composition_children_ts
+      ON context_composition_children(ts);
+  `);
+
   // Every cycle boundary, pruned or not — and the `not` is the point.
   //
   // A prune receipt records what was cut. It cannot record what a resume would

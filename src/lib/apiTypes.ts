@@ -438,7 +438,36 @@ export interface ContextCheckDTO {
 }
 
 /**
- * One provenance's share of one reading of the window — `winnow context`, depth 1.
+ * One node below a provenance — the tool or attachment class, then the artefact.
+ *
+ * The tree `winnow context --depth 3` draws, minus its top level, which is
+ * `ContextCompositionSliceDTO`. **Not a band.** The stacked area is one band per
+ * provenance and these are what one band is made of, for a detail view that
+ * answers a different question of the same reading.
+ */
+export interface ContextCompositionNodeDTO {
+  /**
+   * Winnow's own key. The `×N` it composes onto an artefact it saw more than
+   * once is **not** here — it is `repeat`, so that a view sorting by path is not
+   * sorting by how many times, and one that renders the label as a path is not
+   * printing a count inside it.
+   */
+  label: string;
+  tokens: number;
+  /** `exact` | `derived` | `estimated` | `residual`, as winnow reported it. */
+  kind: string;
+  /**
+   * How many times winnow saw this artefact, or null where it attached no count
+   * — which it does for every node above the artefact level and for an artefact
+   * seen once. Null is "winnow said nothing", never "once".
+   */
+  repeat: number | null;
+  /** The level below, empty at the deepest level the reading was taken at. */
+  children: ContextCompositionNodeDTO[];
+}
+
+/**
+ * One provenance's share of one reading of the window — `winnow context`, depth 3.
  *
  * `kind` is winnow's own word for how the figure was reached and is carried
  * rather than dropped, because a stacked band cannot show it: `prefix` is a
@@ -452,6 +481,18 @@ export interface ContextCompositionSliceDTO {
   tokens: number;
   /** `exact` | `derived` | `estimated` | `residual`, as winnow reported it. */
   kind: string;
+  /**
+   * What this provenance is made of, and **only on the newest reading** —
+   * `ContextOccupancyDTO.composition`'s last entry, and empty on every other.
+   *
+   * An older reading's empty `children` is not a statement that its window held
+   * no tool traffic. The tree is stored for one reading per run and replaced on
+   * each, because a tree per reading is a row per path per reading per run and
+   * nothing caps how many distinct files a run touches. Read it as "what is in
+   * this window now", which is the question it can answer, and never as a
+   * series — the bands above are the series.
+   */
+  children: ContextCompositionNodeDTO[];
 }
 
 /**
@@ -465,7 +506,11 @@ export interface ContextCompositionSliceDTO {
  * minutes, measured on this install — so the slices are drawn against `window`
  * and against nothing else.
  *
- * `slices` sum to `window` by construction: the residual is one of them.
+ * `slices` sum to `window` by construction: the residual is one of them. Their
+ * `children` do **not** sum to their parent, and are not meant to: a node
+ * unreadable at the parse and a tail past the per-node cap are both dropped
+ * rather than pooled into a manufactured bin, so a subtree that falls short is
+ * saying so out loud.
  */
 export interface ContextCompositionDTO {
   ts: number;
