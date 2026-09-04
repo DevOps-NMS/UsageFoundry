@@ -376,7 +376,11 @@ export async function runDreamingNight(opts: {
       // note written into a worktree that is later discarded is a note nobody
       // ever sees.
       isolate: false,
-      permissionMode: "acceptEdits",
+      // Nobody is watching a run a timer started. `acceptEdits` still prompts
+      // for everything that is not a file edit, and a prompt with no operator
+      // behind it stalls the run until the duration guard ends it — no note
+      // written, on the one night the signature qualified for one.
+      permissionMode: "bypassPermissions",
       budget: {
         maxRunCostUSD: settings.dreamingMaxCostUSD,
         maxIterations: MAX_CYCLES,
