@@ -7,6 +7,7 @@ Built and exercised against real transcripts:
 - Cost math cross-checked by hand — `$12.843618` computed independently vs
   `$12.8436175` from the API, on 54 input / 83,517 output / 12,072,025 cache-read
   / 471,941 cache-1h tokens.
+- **Claude Fable 5.1 / Mythos 5.1 rates read from the published table, not measured.** On 2026-09-04, `platform.claude.com/docs/en/about-claude/pricing`: $10 input, $12.50 5m write, $20 1h write, **$0.25 cache hit**, $50 output per MTok, with the page's own footnote that "cache hits and refreshes on Claude Fable 5.1 and Claude Mythos 5.1 are priced at 0.025x the base input price. All other models use the standard 0.1x multiplier." That 0.025× is the only figure in the row `pricing.ts` could not already derive, and it is why the multiplier stopped being a module constant. What is **not** verified: no turn from either model has been through this install's meter, so nothing here confirms the transcript writes a model string these prefixes match — the entries are `claude-fable-5-1` and `claude-mythos-5-1`, taken from the API's model IDs, and a transcript that spells one differently would be priced at the Fable 5 rate below it rather than surfacing as unknown, which is the one failure this shape cannot make loud.
 - Dedup verified (99 → 31 records).
 - **Dedup resolution measured across 1,011 transcript files / 40,885 turns**, on
   2026-08-21: every turn's lines share one `requestId` (0 exceptions), the last

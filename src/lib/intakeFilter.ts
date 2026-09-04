@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import { BYTES_PER_TOKEN } from "./fileCostNotice";
 import {
-  CACHE_READ_MULTIPLIER,
   CACHE_WRITE_1H_MULTIPLIER,
+  cacheReadMultiplierOf,
   resolvePrice,
 } from "./pricing";
 import { scanUsage, type UsageEntry } from "./transcripts";
@@ -380,7 +380,7 @@ export function netFilterSavings(results: UniqueResult[]): FilterNet {
     net.cacheWriteAvoidedUSD += tokens * perToken * CACHE_WRITE_1H_MULTIPLIER;
     net.uncachedSendUSD += tokens * perToken;
     net.cacheReadAvoidedUSD +=
-      tokens * anchor.turnsAfter * perToken * CACHE_READ_MULTIPLIER;
+      tokens * anchor.turnsAfter * perToken * cacheReadMultiplierOf(price);
   }
 
   net.netUSD =

@@ -4,13 +4,25 @@
  * All rates are USD per million tokens, expressed as the *input* base rate.
  * Cache tokens are multiples of that base rate rather than independent numbers:
  *
- *   cache read            0.10x input
+ *   cache read            0.10x input  (per-model; see below)
  *   cache write (5m TTL)  1.25x input
  *   cache write (1h TTL)  2.00x input
  *
  * This matters: Claude Code uses 1h-TTL cache writes heavily, which cost 2x
  * input, not 1.25x. Collapsing both into one "cache creation" number
  * understates spend on exactly the workload this tool is built to measure.
+ *
+ * **The cache read multiplier is a property of the model, not a constant.**
+ * It was 0.10x on every model this table knew until Claude Fable 5.1 and
+ * Claude Mythos 5.1 shipped at 0.025x ($0.25/MTok against a $10 input), and
+ * that is 4x, on the line item this tool exists to measure — a Claude Code
+ * workload is ~98% cache reads, so a hard-coded 0.10x would overstate a Fable
+ * 5.1 run's bill by nearly 4x and refuse it against a ceiling it never
+ * reached. `CACHE_READ_MULTIPLIER` remains the default every entry inherits;
+ * an entry that overrides it says so, and `cacheReadMultiplierOf` is the only
+ * thing that may read either. The write multipliers are still constants
+ * because no model has departed from them; when one does, it takes the same
+ * shape rather than a second mechanism.
  */
 
 export const CACHE_READ_MULTIPLIER = 0.1;
@@ -22,6 +34,25 @@ export interface ModelPrice {
   input: number;
   /** USD per million output tokens. */
   output: number;
+  /**
+   * Cache read as a multiple of `input`, when this model departs from
+   * `CACHE_READ_MULTIPLIER`. Absent means the default, which is what every
+   * entry but the 5.1 pair means.
+   */
+  cacheReadMultiplier?: number;
+}
+
+/**
+ * The cache read multiplier in force for a price, default included.
+ *
+ * Every site that prices a cache read — this module's `costOf`, and the two
+ * counterfactuals in `contextPruning.ts` and `intakeFilter.ts` that price a
+ * read that did *not* happen — goes through here rather than reading the
+ * constant, so a model that departs from it cannot be right in one place and
+ * wrong in three.
+ */
+export function cacheReadMultiplierOf(price: ModelPrice): number {
+  return price.cacheReadMultiplier ?? CACHE_READ_MULTIPLIER;
 }
 
 /**
@@ -29,7 +60,12 @@ export interface ModelPrice {
  * the transcript, so `claude-opus-4-5-20251101` resolves via `claude-opus-4-5`.
  */
 const PRICES: Record<string, ModelPrice> = {
-  // Fable / Mythos tier
+  // Fable / Mythos tier. The 5.1 pair is listed ahead of the 5 pair it would
+  // otherwise prefix-match, and exists *only* to carry the cache read rate:
+  // input and output are the same $10/$50, so an entry left out here would be
+  // priced correctly on both visible columns and 4x wrong on the invisible one.
+  "claude-fable-5-1": { input: 10, output: 50, cacheReadMultiplier: 0.025 },
+  "claude-mythos-5-1": { input: 10, output: 50, cacheReadMultiplier: 0.025 },
   "claude-fable-5": { input: 10, output: 50 },
   "claude-mythos-5": { input: 10, output: 50 },
   "claude-mythos-preview": { input: 10, output: 50 },
@@ -80,6 +116,11 @@ const SONNET_5_INTRO_ENDS = Date.parse("2026-09-01T00:00:00Z");
  * This is the same trade the Claude apps gateway's spend meter makes, and for
  * the same reason — an ID nothing can price must not go unmetered, or a cap
  * stops being a cap.
+ *
+ * It carries no `cacheReadMultiplier`, so it inherits the 0.10x default rather
+ * than Fable 5.1's cheaper 0.025x, and that is the same trade again: the
+ * unknown rate must be the dearest plausible shape, and 0.10x on a $10 input
+ * is dearer than 0.025x on one.
  */
 export const UNKNOWN_MODEL_PRICE: ModelPrice = { input: 10, output: 50 };
 
@@ -205,7 +246,7 @@ export function costOf(tokens: TokenCounts, price: ModelPrice | null): number {
   return (
     tokens.input * perToken +
     tokens.output * outPerToken +
-    tokens.cacheRead * perToken * CACHE_READ_MULTIPLIER +
+    tokens.cacheRead * perToken * cacheReadMultiplierOf(price) +
     tokens.cacheWrite5m * perToken * CACHE_WRITE_5M_MULTIPLIER +
     tokens.cacheWrite1h * perToken * CACHE_WRITE_1H_MULTIPLIER
   );

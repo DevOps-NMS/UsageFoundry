@@ -9,9 +9,9 @@ import { BYTES_PER_TOKEN } from "./fileCostNotice";
 import { fmtTokens } from "./format";
 import { opsLog, recordOpsEvent } from "./ops";
 import {
-  CACHE_READ_MULTIPLIER,
   CACHE_WRITE_1H_MULTIPLIER,
   CACHE_WRITE_5M_MULTIPLIER,
+  cacheReadMultiplierOf,
   resolvePrice,
 } from "./pricing";
 import { scanUsage, type UsageEntry } from "./transcripts";
@@ -3828,7 +3828,7 @@ export function netReceipt(
   const perToken = price.input / 1_000_000;
 
   const cacheSavedUSD =
-    row.tokensRemoved * turnsAfter * perToken * CACHE_READ_MULTIPLIER;
+    row.tokensRemoved * turnsAfter * perToken * cacheReadMultiplierOf(price);
 
   // **Measured where it can be, modelled only until then.**
   //
@@ -3866,7 +3866,13 @@ export function netReceipt(
             row.tokensAfter * perToken * CACHE_WRITE_1H_MULTIPLIER,
           invalidationKnown: true,
         }
-      : boundaryInvalidation(row, resumeWrite, observedWriteUSD, perToken, control);
+      : boundaryInvalidation(
+          row,
+          resumeWrite,
+          observedWriteUSD,
+          perToken * cacheReadMultiplierOf(price),
+          control,
+        );
 
   return {
     turnsAfter,
@@ -3897,7 +3903,8 @@ export function netReceipt(
  * 4. **The resume came back cold, and clean resumes are warm.** The prefix does
  *    normally outlive a cycle boundary here, so the edit is what forced this
  *    write. Charged the difference between what the resume paid and what the
- *    unpruned one would have — a read of the *pre*-prune conversation at 0.1×.
+ *    unpruned one would have — a read of the *pre*-prune conversation at the
+ *    run's own cache read rate, which is 0.1× on every model but the 5.1 pair.
  *
  * With no control, case 3 and case 4 are indistinguishable and the answer is
  * unknown. That is the honest floor: the counterfactual is not recoverable from
@@ -3908,7 +3915,7 @@ function boundaryInvalidation(
   row: NettableCut,
   resumeWrite: ResumeWrite | null,
   observedWriteUSD: number | null,
-  perToken: number,
+  cacheReadPerToken: number,
   control: ResumeControl | null,
 ): { invalidationUSD: number; invalidationKnown: boolean } {
   if (!resumeWrite || observedWriteUSD === null) {
@@ -3928,8 +3935,7 @@ function boundaryInvalidation(
   // allowed to go negative — a resume that wrote less than the read it replaced
   // is a saving the `cacheSavedUSD` side already counts, and crediting it twice
   // here is the double-count this whole function exists to avoid.
-  const avoidedReadUSD =
-    row.tokensBefore * perToken * CACHE_READ_MULTIPLIER;
+  const avoidedReadUSD = row.tokensBefore * cacheReadPerToken;
   return {
     invalidationUSD: Math.max(0, observedWriteUSD - avoidedReadUSD),
     invalidationKnown: true,
