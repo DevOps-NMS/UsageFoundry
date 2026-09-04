@@ -1,10 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ContextOccupancy } from "./ContextOccupancy";
+import {
+  ContextOccupancy,
+  accountedShare,
+  compositionRows,
+} from "./ContextOccupancy";
 import type {
   ContextCheckDTO,
   ContextCompositionDTO,
+  ContextCompositionNodeDTO,
   ContextCompositionSliceDTO,
   ContextOccupancyDTO,
   ContextPruneMarkDTO,
@@ -574,6 +579,122 @@ test("pruning switched off is not a run that has nothing to show yet", () => {
   const pending = render(series({ compositionAbsence: "pending" }));
   assert.match(pending, /paced by\s+how far the conversation has grown/);
   assert.doesNotMatch(pending, /switched off/);
+});
+
+/* ------------------------------------------------------------------ */
+/* What one band is made of                                            */
+/* ------------------------------------------------------------------ */
+
+/** One node below a provenance, with whatever hangs off it. */
+function node(
+  label: string,
+  tokens: number,
+  over: Partial<ContextCompositionNodeDTO> = {},
+): ContextCompositionNodeDTO {
+  return { label, tokens, kind: "exact", repeat: null, children: [], ...over };
+}
+
+/**
+ * The subtree is not reachable through `renderToStaticMarkup`: it is drawn only
+ * for the band an operator has picked, and picking is client state that a static
+ * render never enters. So these assert on the pure half directly, which is why
+ * that half is exported — and every one of the failures below draws a list that
+ * looks entirely ordinary.
+ */
+test("a subtree is ordered largest first at every level, ties on the label", () => {
+  // The rows arrive from SQLite in insertion order rather than in winnow's, so
+  // an unsorted list reads as winnow having found the small things first — a
+  // claim about the conversation, made by the store's `ORDER BY id`.
+  const rows = compositionRows({
+    tokens: 100_000,
+    children: [
+      node("Bash", 10_000, {
+        children: [node("git status", 1_000), node("npm test", 9_000)],
+      }),
+      node("Read", 60_000),
+      // Two at the same size: without a tie-break they may swap between two
+      // polls of the same reading, which reads as movement in a fixed reading.
+      node("zeta", 5_000),
+      node("alpha", 5_000),
+    ],
+  });
+  assert.deepEqual(
+    rows.map((r) => r.label),
+    ["Read", "Bash", "alpha", "zeta"],
+  );
+  assert.deepEqual(
+    rows[1].children.map((r) => r.label),
+    ["npm test", "git status"],
+  );
+});
+
+test("a share is against its own parent and never the band or the window", () => {
+  // The one piece of arithmetic in this region, and the wrong denominator is a
+  // percentage that looks entirely ordinary: 9,000 of the 10,000 its parent
+  // holds is 90%, of the 100,000 band it sits in 9%, and of a 200,000 window 4.5%.
+  const rows = compositionRows({
+    tokens: 100_000,
+    children: [node("Bash", 10_000, { children: [node("npm test", 9_000)] })],
+  });
+  assert.equal(rows[0].share, 0.1);
+  assert.equal(rows[0].children[0].share, 0.9);
+});
+
+test("a parent with no tokens gives no share rather than dividing by zero", () => {
+  // `x / 0` is `Infinity` and `0 / 0` is `NaN`; either one rendered through a
+  // rounding is a percentage on the screen for a figure nothing measured.
+  const rows = compositionRows({ tokens: 0, children: [node("Read", 4_000)] });
+  assert.equal(rows[0].share, null);
+});
+
+test("two parents may carry the same child label without colliding", () => {
+  // Winnow keys a node inside its own parent, so `src/lib/db.ts` can hang off
+  // both Read and Edit. Keyed on the label alone, React draws one row for the
+  // two of them and silently drops the other.
+  const rows = compositionRows({
+    tokens: 100,
+    children: [
+      node("Read", 60, { children: [node("src/lib/db.ts", 60)] }),
+      node("Edit", 40, { children: [node("src/lib/db.ts", 40)] }),
+    ],
+  });
+  const keys = [
+    ...rows.map((r) => r.key),
+    ...rows.flatMap((r) => r.children.map((c) => c.key)),
+  ];
+  assert.equal(new Set(keys).size, keys.length);
+});
+
+test("what the children fall short of is a figure, never a manufactured row", () => {
+  // The store drops a tail past its per-node cap and the parse drops a node it
+  // could not read, so a subtree is allowed not to reach its parent. Pooled into
+  // an "other" row it would be indistinguishable from the residual, which is the
+  // one band whose whole job is to say what nothing accounted for.
+  assert.equal(accountedShare(100, [node("a", 60), node("b", 20)]), 0.8);
+  // Unclamped in the other direction too: children larger than their parent is a
+  // fault to be seen rather than rounded down to a tidy 100%.
+  assert.equal(accountedShare(100, [node("a", 140)]), 1.4);
+  assert.equal(accountedShare(0, [node("a", 40)]), null);
+  assert.equal(accountedShare(100, []), 0);
+});
+
+test("the legend rows are real controls, and nothing is open to begin with", () => {
+  // An SVG path is not a button: the bands answer a pointer only, and the whole
+  // of the keyboard's way into the detail list is the legend row. A row that
+  // went back to being a plain `<li>` renders identically to a sighted reader
+  // and leaves the panel mouse-only.
+  const html = render(
+    series({
+      composition: [reading()],
+      compositionCount: 1,
+      compositionAbsence: null,
+    }),
+  );
+  assert.equal(html.match(/<button type="button" aria-pressed="false"/g)?.length, 6);
+  // And a closed panel claims nothing: no detail list, and no `aria-controls`
+  // pointing at a region that is not in the document.
+  assert.doesNotMatch(html, /aria-controls/);
+  assert.doesNotMatch(html, /at the one reading/);
 });
 
 test("the stack is not sighted-only", () => {
