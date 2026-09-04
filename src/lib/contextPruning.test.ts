@@ -288,23 +288,27 @@ describe("parseTreatEstimate — the in-place pruner's dry run", () => {
 
 describe("parseComposition — what the window is made of", () => {
   /**
-   * Real output, verbatim from `winnow safe run -- context <session> --depth 1
-   * --json` at the pinned ref, with only the session id and its path replaced.
+   * Real output, verbatim from `winnow safe run -- context <session> --depth 3
+   * --json` at the pinned ref, with only the session id, its path and the
+   * checkout it names replaced.
    *
-   * Kept whole rather than reduced to the two fields the parse reads, on
+   * Kept whole rather than reduced to the fields the parse reads, on
    * `parseTreatEstimate`'s grounds: this is another program's output, nothing
    * here can ask it for a schema, and a fixture trimmed to what today's parser
-   * happens to look at cannot fail when the shape around it moves.
+   * happens to look at cannot fail when the shape around it moves. At depth 3
+   * that argument gets sharper rather than weaker — the levels below a band are
+   * where winnow composes labels, and a hand-written tree would be this app's
+   * idea of that composition rather than winnow's.
    */
   const REAL = `{
   "session": "02584a86-0000-0000-0000-000000000000",
   "path": "/root/.claude/projects/-workspace-repo/02584a86-0000-0000-0000-000000000000.jsonl",
-  "records": 788,
-  "requests": 186,
-  "requests_in_window": 186,
+  "records": 339,
+  "requests": 78,
+  "requests_in_window": 78,
   "model": "claude-opus-5",
   "chars_per_token": 2.6,
-  "depth": 1,
+  "depth": 3,
   "by_path": false,
   "pooled_by_path": {
     "tools": [
@@ -313,20 +317,20 @@ describe("parseComposition — what the window is made of", () => {
       "Read",
       "Write"
     ],
-    "paths": 15,
-    "repeated_paths": 9,
+    "paths": 20,
+    "repeated_paths": 1,
     "tokens": {
-      "tokens": 11138,
+      "tokens": 28831,
       "kind": "estimated"
     },
     "repeated": {
-      "tokens": 10725,
-      "percent": 96.288,
+      "tokens": 6428,
+      "percent": 22.2943,
       "kind": "estimated"
     }
   },
   "window": {
-    "tokens": 433331,
+    "tokens": 258165,
     "kind": "exact"
   },
   "fullness": null,
@@ -348,67 +352,450 @@ describe("parseComposition — what the window is made of", () => {
   "nodes": [
     {
       "label": "tool traffic",
-      "tokens": 185525,
+      "tokens": 118974,
       "kind": "estimated",
-      "share": 0.428137,
+      "share": 0.460845,
       "note": "",
-      "children": []
+      "children": [
+        {
+          "label": "tool_use inputs",
+          "tokens": 56500,
+          "kind": "estimated",
+          "share": 0.218852,
+          "note": "",
+          "children": [
+            {
+              "label": "Write  \\u00d711",
+              "tokens": 44057,
+              "kind": "estimated",
+              "share": 0.170654,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "Bash  \\u00d769",
+              "tokens": 12076,
+              "kind": "estimated",
+              "share": 0.046776,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "Read  \\u00d711",
+              "tokens": 367,
+              "kind": "estimated",
+              "share": 0.001422,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "label": "Bash results",
+          "tokens": 33643,
+          "kind": "estimated",
+          "share": 0.130316,
+          "note": "",
+          "children": [
+            {
+              "label": "$ export  \\u00d75",
+              "tokens": 18106,
+              "kind": "estimated",
+              "share": 0.070133,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ cd  \\u00d745",
+              "tokens": 10030,
+              "kind": "estimated",
+              "share": 0.038851,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ grep  \\u00d74",
+              "tokens": 3505,
+              "kind": "estimated",
+              "share": 0.013577,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ ls",
+              "tokens": 642,
+              "kind": "estimated",
+              "share": 0.002487,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ npm  \\u00d74",
+              "tokens": 488,
+              "kind": "estimated",
+              "share": 0.00189,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ echo  \\u00d72",
+              "tokens": 304,
+              "kind": "estimated",
+              "share": 0.001178,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ node  \\u00d73",
+              "tokens": 267,
+              "kind": "estimated",
+              "share": 0.001034,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ which",
+              "tokens": 86,
+              "kind": "estimated",
+              "share": 0.000333,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ find",
+              "tokens": 69,
+              "kind": "estimated",
+              "share": 0.000267,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ rm",
+              "tokens": 54,
+              "kind": "estimated",
+              "share": 0.000209,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ set",
+              "tokens": 51,
+              "kind": "estimated",
+              "share": 0.000198,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "$ wc",
+              "tokens": 41,
+              "kind": "estimated",
+              "share": 0.000159,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "label": "Read results",
+          "tokens": 28352,
+          "kind": "estimated",
+          "share": 0.109821,
+          "note": "",
+          "children": [
+            {
+              "label": "/workspace/repo/src/lib/db.ts  \\u00d73",
+              "tokens": 6428,
+              "kind": "estimated",
+              "share": 0.024899,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/src/lib/serverLock.ts",
+              "tokens": 3879,
+              "kind": "estimated",
+              "share": 0.015025,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/Dockerfile",
+              "tokens": 3648,
+              "kind": "estimated",
+              "share": 0.01413,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/src/lib/logLine.ts",
+              "tokens": 3647,
+              "kind": "estimated",
+              "share": 0.014127,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/src/lib/config.ts",
+              "tokens": 3122,
+              "kind": "estimated",
+              "share": 0.012093,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/src/instrumentation.ts",
+              "tokens": 2400,
+              "kind": "estimated",
+              "share": 0.009296,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/docker-compose.yml",
+              "tokens": 2208,
+              "kind": "estimated",
+              "share": 0.008553,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/src/lib/transcripts.ts",
+              "tokens": 1963,
+              "kind": "estimated",
+              "share": 0.007604,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/workspace/repo/src/middleware.ts",
+              "tokens": 1057,
+              "kind": "estimated",
+              "share": 0.004094,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "label": "Write results",
+          "tokens": 479,
+          "kind": "estimated",
+          "share": 0.001855,
+          "note": "",
+          "children": [
+            {
+              "label": "/tmp/uf-97-correction.md",
+              "tokens": 46,
+              "kind": "estimated",
+              "share": 0.000178,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-summary.md",
+              "tokens": 46,
+              "kind": "estimated",
+              "share": 0.000178,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-1.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-2.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-3.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-4.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-5.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-6.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-7.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-8.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            },
+            {
+              "label": "/tmp/uf-ops-9.md",
+              "tokens": 43,
+              "kind": "estimated",
+              "share": 0.000167,
+              "note": "",
+              "children": []
+            }
+          ]
+        }
+      ]
     },
     {
       "label": "prefix",
-      "tokens": 146870,
+      "tokens": 82313,
       "kind": "derived",
-      "share": 0.338933,
-      "note": "152,217 exact at the first request in this window, less 5,347 estimated visible before it \\u2014 the system prompt and tool definitions, which no transcript records (--explain prefix)",
+      "share": 0.318839,
+      "note": "89,960 exact at the first request in this window, less 7,647 estimated visible before it \\u2014 the system prompt and tool definitions, which no transcript records (--explain prefix)",
       "children": []
     },
     {
       "label": "retained reasoning",
-      "tokens": 72903,
+      "tokens": 40831,
       "kind": "derived",
-      "share": 0.168239,
-      "note": "100 thinking blocks over 100 responses, median 483 tokens per block in this session; the control is 85 responses with no thinking block, median 73 left over",
+      "share": 0.158159,
+      "note": "60 thinking blocks over 60 responses, median 541 tokens per block in this session; the control is 17 responses with no thinking block, median 64 left over",
       "children": []
     },
     {
       "label": "standing configuration",
-      "tokens": 15718,
+      "tokens": 6622,
       "kind": "estimated",
-      "share": 0.036273,
+      "share": 0.02565,
       "note": "",
-      "children": []
+      "children": [
+        {
+          "label": "nested_memory",
+          "tokens": 3456,
+          "kind": "estimated",
+          "share": 0.013387,
+          "note": "",
+          "children": [
+            {
+              "label": "~/.claude/rules/typescript.md",
+              "tokens": 3456,
+              "kind": "estimated",
+              "share": 0.013387,
+              "note": "",
+              "children": []
+            }
+          ]
+        },
+        {
+          "label": "skill_listing",
+          "tokens": 2407,
+          "kind": "estimated",
+          "share": 0.009323,
+          "note": "",
+          "children": []
+        },
+        {
+          "label": "agent_listing_delta",
+          "tokens": 549,
+          "kind": "estimated",
+          "share": 0.002127,
+          "note": "",
+          "children": []
+        },
+        {
+          "label": "deferred_tools_delta",
+          "tokens": 155,
+          "kind": "estimated",
+          "share": 0.0006,
+          "note": "",
+          "children": []
+        },
+        {
+          "label": "task_reminder",
+          "tokens": 55,
+          "kind": "estimated",
+          "share": 0.000213,
+          "note": "",
+          "children": []
+        }
+      ]
     },
     {
       "label": "conversation",
-      "tokens": 2068,
+      "tokens": 5670,
       "kind": "estimated",
-      "share": 0.004772,
+      "share": 0.021963,
       "note": "",
-      "children": []
+      "children": [
+        {
+          "label": "user turns",
+          "tokens": 4536,
+          "kind": "estimated",
+          "share": 0.01757,
+          "note": "",
+          "children": []
+        },
+        {
+          "label": "assistant text",
+          "tokens": 1134,
+          "kind": "estimated",
+          "share": 0.004393,
+          "note": "",
+          "children": []
+        }
+      ]
     },
     {
       "label": "unattributed",
-      "tokens": 10247,
+      "tokens": 3755,
       "kind": "residual",
-      "share": 0.023647,
+      "share": 0.014545,
       "note": "",
       "children": []
     }
   ],
-  "notes": [
-    "a \`user\` text block carrying Skill's return outside a tool_result envelope is counted as tool traffic, paired by sourceToolUseID"
-  ],
+  "notes": [],
   "derivations": {
     "exact": "read from usage.{input,cache_creation,cache_read}_tokens on the anchoring request",
     "derived": "an exact number minus an estimate",
     "estimated": "payload characters / 2.6 (01- \\u00a72.3; the band is 2.4-3.0)",
     "residual": "the window less everything above it; what no kind accounts for"
   }
-}`;
+}
+`;
 
   it("reads the exact window and every top-level node", () => {
     const c = parseComposition(REAL)!;
-    assert.equal(c.window, 433_331);
+    assert.equal(c.window, 258_165);
     assert.deepEqual(
       c.slices.map((s) => s.label),
       [
@@ -485,6 +872,150 @@ describe("parseComposition — what the window is made of", () => {
     assert.equal(
       parseComposition(JSON.stringify({ window: { tokens: 500 }, nodes: [] })),
       null,
+    );
+  });
+
+  it("carries both levels below a band, and a band that has none", () => {
+    // The whole of what depth 3 buys: the tool or attachment class, then the
+    // artefact. Silent both ways — a parse that stopped at the class would leave
+    // a detail view saying "Read results" and nothing about which file, and one
+    // that flattened the two would put file paths and tool names in one list
+    // where no reader could tell which was which.
+    const c = parseComposition(REAL)!;
+    const byLabel = new Map(c.slices.map((s) => [s.label, s]));
+    assert.deepEqual(
+      byLabel.get("tool traffic")!.children.map((n) => n.label),
+      ["tool_use inputs", "Bash results", "Read results", "Write results"],
+    );
+    assert.deepEqual(
+      byLabel
+        .get("tool traffic")!
+        .children.find((n) => n.label === "Read results")!
+        .children.slice(0, 2)
+        .map((n) => [n.label, n.tokens]),
+      [
+        ["/workspace/repo/src/lib/db.ts", 6428],
+        ["/workspace/repo/src/lib/serverLock.ts", 3879],
+      ],
+    );
+    // `prefix` is a subtraction and `unattributed` is what nothing accounted
+    // for; neither decomposes into anything, and an empty subtree on them is
+    // winnow's answer rather than a parse that gave up.
+    assert.deepEqual(byLabel.get("prefix")!.children, []);
+    assert.deepEqual(byLabel.get("unattributed")!.children, []);
+  });
+
+  it("lifts winnow's repeat count off the label instead of leaving it in", () => {
+    // `context.py`'s `decorate()` welds the count onto the key — `db.ts  ×3`.
+    // Silent if it is left there: a detail view keyed on the label treats one
+    // file read three times and the same file read four as two different files,
+    // and any view rendering the label as a path prints `×3` inside it. The two
+    // halves are separate facts and are stored as two.
+    const c = parseComposition(REAL)!;
+    const reads = c.slices
+      .find((s) => s.label === "tool traffic")!
+      .children.find((n) => n.label === "Read results")!.children;
+    const db = reads.find((n) => n.label === "/workspace/repo/src/lib/db.ts")!;
+    assert.equal(db.repeat, 3);
+    // Read once, so winnow attached no count. Null rather than 1: 1 would be
+    // this app asserting a number winnow never printed.
+    assert.equal(reads.find((n) => n.label === "/workspace/repo/Dockerfile")!.repeat, null);
+    // Nothing above the artefact level carries one, and a key that ends in
+    // something shaped like a count but was never decorated keeps it.
+    assert.equal(
+      c.slices.find((s) => s.label === "tool traffic")!.children[0].repeat,
+      null,
+    );
+    const literal = parseComposition(
+      JSON.stringify({
+        window: { tokens: 100, kind: "exact" },
+        nodes: [
+          {
+            label: "tool traffic",
+            tokens: 100,
+            children: [{ label: "a file called  ×0", tokens: 100 }],
+          },
+        ],
+      }),
+    )!;
+    assert.equal(literal.slices[0].children[0].label, "a file called  ×0");
+    assert.equal(literal.slices[0].children[0].repeat, null);
+  });
+
+  it("drops a child it cannot read rather than drawing it at zero", () => {
+    // The top level's rule one level down, and it has to be the same rule: a
+    // zero says winnow measured nothing there, which is a claim, where a missing
+    // child leaves the subtree short of its parent — visible, and the only
+    // signal a detail view has that something did not survive the parse.
+    const c = parseComposition(
+      JSON.stringify({
+        window: { tokens: 1_000, kind: "exact" },
+        nodes: [
+          {
+            label: "tool traffic",
+            tokens: 1_000,
+            kind: "estimated",
+            children: [
+              { label: "Read results", tokens: 600, kind: "estimated" },
+              { label: "no tokens at all", kind: "estimated" },
+              { label: "not a number", tokens: "600", kind: "estimated" },
+              { label: "", tokens: 100, kind: "estimated" },
+              { label: "measured at zero", tokens: 0, kind: "estimated" },
+            ],
+          },
+        ],
+      }),
+    )!;
+    assert.deepEqual(
+      c.slices[0].children.map((n) => n.label),
+      ["Read results", "measured at zero"],
+    );
+    assert.ok(
+      c.slices[0].children.reduce((n, x) => n + x.tokens, 0) < c.slices[0].tokens,
+      "a dropped child must leave the subtree visibly short of its band",
+    );
+  });
+
+  it("caps a node's children at the largest, and never pools the tail", () => {
+    // The one dimension nothing on this path caps: a run may touch any number of
+    // distinct files, and each is a row. Silent if the cap took the tail instead
+    // — a detail view headed by eleven-token artefacts, with the file that is
+    // actually filling the window absent. Shuffled here rather than fed in
+    // winnow's own descending order, because the guarantee must not rest on
+    // another program's sort.
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      label: `/workspace/repo/file-${i}.ts`,
+      tokens: (i * 977) % 200,
+      kind: "estimated",
+    }));
+    const c = parseComposition(
+      JSON.stringify({
+        window: { tokens: 100_000, kind: "exact" },
+        nodes: [
+          {
+            label: "tool traffic",
+            tokens: 100_000,
+            kind: "estimated",
+            children: [{ label: "Read results", tokens: 100_000, children: many }],
+          },
+        ],
+      }),
+    )!;
+    const kept = c.slices[0].children[0].children;
+    assert.equal(kept.length, 64);
+    const largest = [...many].sort((a, b) => b.tokens - a.tokens).slice(0, 64);
+    assert.deepEqual(
+      kept.map((n) => n.tokens),
+      largest.map((n) => n.tokens),
+    );
+    // No "other", no residual, nothing summed into a neighbour. The dropped tail
+    // is dropped, on the same argument as the line above: a manufactured bin is
+    // a node indistinguishable from `unattributed`, whose whole job is to say
+    // what nothing accounted for.
+    assert.ok(!kept.some((n) => /other/i.test(n.label)));
+    assert.ok(
+      kept.reduce((n, x) => n + x.tokens, 0) < c.slices[0].children[0].tokens,
+      "the tail is gone, not folded in",
     );
   });
 });

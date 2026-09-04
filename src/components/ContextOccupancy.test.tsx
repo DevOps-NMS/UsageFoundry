@@ -5,6 +5,7 @@ import { ContextOccupancy } from "./ContextOccupancy";
 import type {
   ContextCheckDTO,
   ContextCompositionDTO,
+  ContextCompositionSliceDTO,
   ContextOccupancyDTO,
   ContextPruneMarkDTO,
   ContextSampleDTO,
@@ -85,6 +86,18 @@ function series(over: Partial<ContextOccupancyDTO> = {}): ContextOccupancyDTO {
 }
 
 /**
+ * One band of one reading, with no subtree.
+ *
+ * Every case in this file is about the stacked area, which draws the top level
+ * and nothing under it, so the fixtures carry no children — and a helper rather
+ * than an empty array repeated thirteen times, so the next level added below a
+ * band does not touch a single case here.
+ */
+function band(label: string, tokens: number, kind: string): ContextCompositionSliceDTO {
+  return { label, tokens, kind, children: [] };
+}
+
+/**
  * One composition reading. `window` deliberately differs from the sample at the
  * same instant — that is the divergence the panel exists to keep apart, not a
  * mistake in the fixture.
@@ -95,12 +108,12 @@ function reading(over: Partial<ContextCompositionDTO> = {}): ContextCompositionD
     iteration: 2,
     window: 100_000,
     slices: [
-      { label: "tool traffic", tokens: 50_000, kind: "estimated" },
-      { label: "prefix", tokens: 30_000, kind: "derived" },
-      { label: "retained reasoning", tokens: 12_000, kind: "derived" },
-      { label: "standing configuration", tokens: 5_000, kind: "estimated" },
-      { label: "conversation", tokens: 2_000, kind: "estimated" },
-      { label: "unattributed", tokens: 1_000, kind: "residual" },
+      band("tool traffic", 50_000, "estimated"),
+      band("prefix", 30_000, "derived"),
+      band("retained reasoning", 12_000, "derived"),
+      band("standing configuration", 5_000, "estimated"),
+      band("conversation", 2_000, "estimated"),
+      band("unattributed", 1_000, "residual"),
     ],
     ...over,
   };
@@ -462,15 +475,15 @@ test("the bands are ordered once over the series, not per reading", () => {
     ts: NOW - 1_000,
     window: 100_000,
     slices: [
-      { label: "prefix", tokens: 60_000, kind: "derived" },
-      { label: "tool traffic", tokens: 40_000, kind: "estimated" },
+      band("prefix", 60_000, "derived"),
+      band("tool traffic", 40_000, "estimated"),
     ],
   });
   const late = reading({
     window: 200_000,
     slices: [
-      { label: "tool traffic", tokens: 140_000, kind: "estimated" },
-      { label: "prefix", tokens: 60_000, kind: "derived" },
+      band("tool traffic", 140_000, "estimated"),
+      band("prefix", 60_000, "derived"),
     ],
   });
   const html = render(
@@ -499,9 +512,9 @@ test("the residual is the top band whatever its size", () => {
         reading({
           window: 100_000,
           slices: [
-            { label: "tool traffic", tokens: 50_000, kind: "estimated" },
-            { label: "unattributed", tokens: 40_000, kind: "residual" },
-            { label: "conversation", tokens: 10_000, kind: "estimated" },
+            band("tool traffic", 50_000, "estimated"),
+            band("unattributed", 40_000, "residual"),
+            band("conversation", 10_000, "estimated"),
           ],
         }),
       ],
