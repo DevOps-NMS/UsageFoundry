@@ -555,20 +555,22 @@ export default function Dashboard() {
         </span>
       </span>
       <Sep />
-      <span>{meta.entryCount.toLocaleString()} deduplicated turns</span>
+      {/* This app's own footprint used to get its own segment here — it is a
+          fact about the reading, not a reading, and it used to be the thing
+          that eventually killed the container — but a reader skimming this
+          strip for usage facts has no use for a live number, so it now rides
+          the count it fills rather than standing beside it: the parsed turns
+          are what fills this heap. Still findable on hover, not on the eviction
+          Notice below, because that one only renders once the cache is already
+          past its bound and this figure is the thing an operator would want
+          before that happens. */}
+      <span
+        title={`${Math.round(meta.memory.heapUsedBytes / 1e6).toLocaleString()} MB heap of ${Math.round(meta.memory.heapLimitBytes / 1e6).toLocaleString()} MB — ${meta.memory.cache.entries.toLocaleString()} of at most ${meta.memory.cache.maxEntries.toLocaleString()} parsed turns cached across ${meta.memory.cache.files.toLocaleString()} files`}
+      >
+        {meta.entryCount.toLocaleString()} deduplicated turns
+      </span>
       <Sep />
       <span>{meta.fileCount.toLocaleString()} session files</span>
-      <Sep />
-      {/* This app's own footprint. It belongs on the provenance strip rather
-          than in a card because it is a fact about the reading, not a reading:
-          the parsed turns above are what fills this heap, and it used to be the
-          thing that eventually killed the container. */}
-      <span
-        title={`${meta.memory.cache.entries.toLocaleString()} of at most ${meta.memory.cache.maxEntries.toLocaleString()} parsed turns cached across ${meta.memory.cache.files.toLocaleString()} files`}
-      >
-        {Math.round(meta.memory.heapUsedBytes / 1e6).toLocaleString()} MB heap of{" "}
-        {Math.round(meta.memory.heapLimitBytes / 1e6).toLocaleString()} MB
-      </span>
       {meta.entrypoints.length > 0 && (
         <>
           <Sep />
