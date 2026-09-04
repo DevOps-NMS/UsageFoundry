@@ -3,9 +3,10 @@
 // Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
 // rewrites the path alias at runtime, so a tested component has to import the
 // way src/lib, Meter.tsx and LiveTelemetry.tsx already do.
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type ReactNode, useId, useState } from "react";
 import type {
   ContextCompositionDTO,
+  ContextCompositionNodeDTO,
   ContextCompositionSliceDTO,
   ContextOccupancyDTO,
   ContextSampleDTO,
@@ -185,6 +186,8 @@ export function ContextOccupancy({
             readings={context.composition}
             readingCount={context.compositionCount}
             absence={context.compositionAbsence}
+            now={now}
+            live={live}
           />
 
           <Caption
@@ -570,6 +573,20 @@ const BAND_FILL = [
 ] as const;
 
 /**
+ * The legend row's two states, as one lookup rather than an interpolated class.
+ *
+ * A wash and never a border, which is the chat's proposal rows' rule: a row that
+ * gained a border on selection would shift the five beside it. Both entries set
+ * the same property, so they are one `Record` and not a shared string plus a
+ * conditional one — split, the winner is Tailwind's own sort order rather than
+ * anything written here.
+ */
+const LEGEND_ROW: Record<"picked" | "idle", string> = {
+  picked: "bg-selection",
+  idle: "hover:bg-fill-hover active:bg-fill-active",
+};
+
+/**
  * What the window is made of, over the same span as the series above it.
  *
  * ## The one thing this must not be read as
@@ -598,16 +615,38 @@ const BAND_FILL = [
  * disagree about the order — and bands that swap places mid-chart cross each
  * other, which reads as one provenance turning into another. The order is
  * settled once, over the whole series, and every reading is stacked in it.
+ *
+ * ## What picking a band opens, and what that is not
+ *
+ * The one piece of client state on this panel. A picked provenance draws its
+ * subtree under the legend — the *newest* reading's, which is the only one that
+ * carries a tree — and picking it again closes it. It is not a `Disclosure` and
+ * not a set of them: one region below the chart whose subject changes is a
+ * selection, where six panels each opening under their own row and closing each
+ * other is the accordion `docs/agent/conventions.md` forbids. So the legend rows
+ * are `aria-pressed` toggles rather than `aria-expanded` headers.
  */
 function CompositionStack({
   readings,
   readingCount,
   absence,
+  now,
+  live,
 }: {
   readings: ContextCompositionDTO[];
   readingCount: number;
   absence: ContextOccupancyDTO["compositionAbsence"];
+  now: number;
+  /** Only the wording of the reading's age depends on it; see `ContextOccupancy`. */
+  live: boolean;
 }) {
+  // Above the early return, because a hook may not sit behind one. Holding the
+  // *label* rather than an index: the band order is settled over the series and
+  // a provenance can leave the newest reading between two polls, so an index
+  // would silently come to mean a different band.
+  const [picked, setPicked] = useState<string | null>(null);
+  const detailId = useId();
+
   if (readings.length === 0) {
     return (
       <p className="mt-2 max-w-[68ch] text-xs leading-snug text-ink-muted">
@@ -663,6 +702,16 @@ function CompositionStack({
   const latest = readings[readings.length - 1];
   const latestByLabel = new Map(latest.slices.map((s) => [s.label, s]));
 
+  // Derived during the render rather than corrected in an effect: a band that
+  // leaves the newest reading has to read as *closed*, and an effect resetting
+  // the state would paint one frame of a detail list for a provenance the chart
+  // above no longer draws.
+  const open = picked !== null && order.includes(picked) ? picked : null;
+  const openSlice = open === null ? null : (latestByLabel.get(open) ?? null);
+  const detailRows = openSlice === null ? [] : compositionRows(openSlice);
+  const toggle = (label: string) =>
+    setPicked((current) => (current === label ? null : label));
+
   return (
     <>
       <svg
@@ -700,7 +749,19 @@ function CompositionStack({
             <path
               key={label}
               d={d}
-              className={`${BAND_FILL[band]} stroke-surface`}
+              // A pointer shortcut for the legend's own button and never the
+              // only way in: this `<svg>` is `role="img"`, so everything inside
+              // it is presentational and no assistive technology can reach a
+              // handler here whatever element it hangs on. The real control is
+              // the legend row, which is a `<button>` and takes the keyboard.
+              //
+              // Nothing marks the picked band on the chart. A stroke would eat
+              // it — the separator is centred on the boundary and `conversation`
+              // runs about four units tall — and dimming its neighbours would
+              // take the six fills below the 3:1 against `--bg-raised` they were
+              // computed to clear. The legend row carries the state instead.
+              onClick={() => toggle(label)}
+              className={`${BAND_FILL[band]} cursor-pointer stroke-surface`}
               // The gap between stacked segments, drawn as a surface-coloured
               // edge rather than as a real gap: a gap would let the chart's ground
               // through and make each band look like it had its own baseline.
@@ -714,9 +775,10 @@ function CompositionStack({
               strokeLinejoin="round"
             >
               {/* The native tooltip, which is the whole of this chart's hover
-                  layer. A crosshair would need client state on a component that
-                  has none and is re-rendered on a three-second poll; the band's
-                  own identity is what a pointer is actually asking for.
+                  layer. Still not a crosshair now that this component does hold
+                  state: a hover readout does not exist on touch and is not
+                  reachable from the keyboard, so what the panel owes a reader is
+                  the detail list below rather than a richer thing to hover.
 
                   One interpolated string and never `{label} — {value}`. React
                   renders a `<title>` whose children are an *array* as empty,
@@ -738,25 +800,68 @@ function CompositionStack({
           One column and not two. These labels are winnow's and cannot be
           shortened here, and at 21rem a two-column grid truncated four of the
           six — "retained reaso…", "standing confi…" — which is the legend
-          failing at the one job it has. Six rows is the cost. */}
+          failing at the one job it has. Six rows is the cost.
+
+          Each row is the keyboard half of picking a band, so it owes a real
+          control's hit target rather than the 16px a line of `text-xs` had —
+          `--control-h` at the pointer and 44px below the breakpoint, which is
+          what turns six lines into roughly twice the height they were. */}
       <ul className="mt-1.5 space-y-0.5 text-xs text-ink-muted">
         {order.map((label, band) => {
           const slice = latestByLabel.get(label);
+          const isOpen = open === label;
           return (
-            <li key={label} className="flex items-baseline gap-1.5">
-              <svg
-                viewBox="0 0 8 8"
-                className="h-2 w-2 shrink-0 translate-y-px"
-                aria-hidden="true"
+            <li key={label}>
+              <button
+                type="button"
+                // A toggle and not a disclosure header: at most one is pressed,
+                // pressing the pressed one lets go, and what it governs is one
+                // region below all six rather than a panel under this one.
+                aria-pressed={isOpen}
+                // Only while the region exists — an `aria-controls` naming an id
+                // that is not in the document is a reference to nothing.
+                aria-controls={isOpen ? detailId : undefined}
+                onClick={() => toggle(label)}
+                // `-mx-1.5` against the `px-1.5`: the wash needs to reach past
+                // the text, and the label still has to line up with the chart's
+                // own left edge.
+                className={`ui-transition -mx-1.5 flex min-h-[var(--control-h)] w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left max-md:min-h-11 ${LEGEND_ROW[isOpen ? "picked" : "idle"]}`}
               >
-                <rect x="0" y="0" width="8" height="8" className={BAND_FILL[band]} />
-              </svg>
-              <span className="min-w-0 flex-1">{label}</span>
-              <span className="tabular-nums">{fmtTokens(slice?.tokens ?? 0)}</span>
+                <svg viewBox="0 0 8 8" className="h-2 w-2 shrink-0" aria-hidden="true">
+                  <rect x="0" y="0" width="8" height="8" className={BAND_FILL[band]} />
+                </svg>
+                <span className="min-w-0 flex-1">{label}</span>
+                <span className="tabular-nums">{fmtTokens(slice?.tokens ?? 0)}</span>
+              </button>
             </li>
           );
         })}
       </ul>
+
+      {/* The detail list is replaced without anything moving focus: pressing a
+          second band while one is open swaps its whole contents, and
+          `aria-pressed` announces the button rather than what changed below it.
+          The three filtered lists on the runs, run and settings pages carry the
+          same line on the same grounds. */}
+      <p className="sr-only" aria-live="polite">
+        {open === null
+          ? ""
+          : detailRows.length === 0
+            ? `${open}: nothing below it in this reading`
+            : `${open}: ${detailRows.length} ${detailRows.length === 1 ? "part" : "parts"} below, largest first`}
+      </p>
+
+      {openSlice !== null && (
+        <CompositionDetail
+          id={detailId}
+          slice={openSlice}
+          rows={detailRows}
+          reading={latest}
+          readingHasTree={latest.slices.some((s) => s.children.length > 0)}
+          now={now}
+          live={live}
+        />
+      )}
 
       {/* Discrete, so it is a table — the same split the sparkline makes. The
           `kind` column is here rather than in the legend because it is a word
@@ -872,6 +977,222 @@ function describeComposition(
     `What the context is made of, over ${readings} ` +
     `${readings === 1 ? "reading" : "readings"}. At the last one the window was ` +
     `${fmtTokens(latest.window)} tokens: ${parts.join(", ")}.`
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* What one band is made of                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One node of a picked provenance's subtree, with its share of its own parent.
+ *
+ * Exported for its test and for nothing else, which is a deviation worth
+ * stating: this list lives behind the panel's one piece of client state, so
+ * `renderToStaticMarkup` — the whole of what this suite can do to a component —
+ * never reaches it, and `bandOrder`'s trick of asserting on the drawn markup is
+ * not available. Both of its failures are silent: a list ordered by arrival
+ * rather than by size reads as winnow having found the small things first, and a
+ * share taken against the wrong parent is a percentage that looks entirely
+ * ordinary.
+ */
+export interface CompositionDetailRow {
+  label: string;
+  tokens: number;
+  /** Winnow's own word, passed through — `""` where it attached none. */
+  kind: string;
+  /** How many times winnow saw this artefact; null is "it said nothing". */
+  repeat: number | null;
+  /** Of its own parent, 0–1, or null where the parent reported no tokens. */
+  share: number | null;
+  /** Unique among siblings *and* across the whole subtree — see `compositionRows`. */
+  key: string;
+  children: CompositionDetailRow[];
+}
+
+/**
+ * One provenance's subtree, largest first at every level.
+ *
+ * Winnow already returns its nodes largest-first, and the store's per-node cap
+ * sorts before it truncates — so this is a re-sort of an order that is usually
+ * already right, kept because "usually" is not a property the reader can check
+ * and because the rows arrive from SQLite in insertion order rather than in
+ * winnow's. Ties break on the label, so two equal nodes cannot swap between two
+ * polls of the same reading.
+ *
+ * **Nothing is binned and nothing is dropped.** The children of a node do not
+ * sum to it — a node unreadable at the parse and a tail past
+ * `COMPOSITION_CHILDREN_PER_NODE` are both dropped rather than pooled — so the
+ * shares are allowed to fall short, and the caller says by how much. An "other"
+ * row here would be indistinguishable from the residual, which is the one band
+ * whose whole job is to say what nothing accounted for.
+ *
+ * The key is the path from the provenance down, joined on a byte no winnow label
+ * can contain: two parents may hand back the same child label, and a key built
+ * by concatenating with a printable separator would collide across them.
+ */
+export function compositionRows(
+  node: Pick<ContextCompositionSliceDTO, "tokens" | "children">,
+  prefix = "",
+): CompositionDetailRow[] {
+  return [...node.children]
+    .sort((a, b) => b.tokens - a.tokens || a.label.localeCompare(b.label))
+    .map((child) => {
+      const key = `${prefix}\u0000${child.label}`;
+      return {
+        label: child.label,
+        tokens: child.tokens,
+        kind: child.kind,
+        repeat: child.repeat,
+        share: node.tokens > 0 ? child.tokens / node.tokens : null,
+        key,
+        children: compositionRows(child, key),
+      };
+    });
+}
+
+/**
+ * What a node's own children account for of it, 0–1, or null where it has no
+ * tokens to divide by.
+ *
+ * Deliberately unclamped. Children that came back larger than their parent give
+ * a figure over 1 and the caller prints it, because a subtree that does not add
+ * up is the one thing this region must not smooth over — the same reason the
+ * tail is dropped rather than pooled.
+ */
+export function accountedShare(
+  tokens: number,
+  children: readonly ContextCompositionNodeDTO[],
+): number | null {
+  if (!(tokens > 0)) return null;
+  return children.reduce((sum, child) => sum + child.tokens, 0) / tokens;
+}
+
+/**
+ * What the picked provenance holds, from the newest reading.
+ *
+ * ## Why it says when the reading was taken
+ *
+ * Because it is one instant and the chart above it is a series, and the two
+ * readings are paced differently: the sample series gains a point on every
+ * `usage` frame, the composition on `COMPOSITION_REMEASURE_GROWTH_TOKENS` of
+ * growth — so the newest reading is routinely older than the last point drawn,
+ * and a list under a live chart reads as live unless something says otherwise.
+ * The age is relative while the run can move and a clock time when it cannot,
+ * which is the split the headline figure already makes.
+ *
+ * ## The three ways of having nothing
+ *
+ * Two of them never reach here: `CompositionStack` returns early with pruning
+ * switched off and with nothing read yet, so there is no legend and no band to
+ * pick. What is left is a reading that exists and holds nothing below this band,
+ * and it is three answers rather than one empty list — the residual has no
+ * subtree by construction, a reading stored before the tree was is missing all
+ * six of them, and this band alone having none is a fact about this band.
+ */
+function CompositionDetail({
+  id,
+  slice,
+  rows,
+  reading,
+  readingHasTree,
+  now,
+  live,
+}: {
+  id: string;
+  slice: ContextCompositionSliceDTO;
+  rows: CompositionDetailRow[];
+  reading: ContextCompositionDTO;
+  /** Whether *any* band in this reading came back with something under it. */
+  readingHasTree: boolean;
+  now: number;
+  live: boolean;
+}) {
+  const taken = live
+    ? `taken ${fmtRelative(reading.ts, now)}`
+    : `taken at ${fmtClock(reading.ts)}`;
+  const accounted = accountedShare(slice.tokens, slice.children);
+  const accountedPct = accounted === null ? null : Math.round(accounted * 100);
+
+  return (
+    <div id={id} className="mt-1.5 rounded-lg bg-inset p-2 text-xs text-ink-muted">
+      <p className="max-w-[68ch] leading-snug">
+        Inside {slice.label}, at the one reading {taken} — not the span the bands
+        cover.
+      </p>
+
+      {rows.length === 0 ? (
+        <p className="mt-1.5 max-w-[68ch] leading-snug">
+          {slice.kind === "residual" ? (
+            <>
+              {slice.label} is what nothing accounted for, so there is nothing
+              under it to list.
+            </>
+          ) : !readingHasTree ? (
+            <>
+              This reading carries nothing below the top level — not{" "}
+              {slice.label} and not any other band.
+            </>
+          ) : (
+            <>Nothing below {slice.label} came back in this reading.</>
+          )}
+        </p>
+      ) : (
+        <>
+          <DetailRows rows={rows} nested={false} />
+          {/* Said rather than binned. The shares are allowed not to reach 100%
+              and this is the figure that says so out loud; a figure *over* it is
+              printed too, because a subtree larger than its parent is a fault to
+              be seen rather than clamped away. */}
+          {accountedPct !== null && accountedPct !== 100 && (
+            <p className="mt-1.5 max-w-[68ch] leading-snug">
+              These rows come to {accountedPct}% of {slice.label}; the rest is
+              not broken down.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One level of the subtree. Nested as a real list, so the depth is not a margin. */
+function DetailRows({
+  rows,
+  nested,
+}: {
+  rows: CompositionDetailRow[];
+  nested: boolean;
+}) {
+  return (
+    <ul
+      className={
+        nested ? "mt-1 space-y-1 border-l border-line pl-2" : "mt-1.5 space-y-1"
+      }
+    >
+      {rows.map((row) => (
+        <li key={row.key}>
+          <div className="flex items-baseline gap-1.5">
+            {/* These are file paths and command heads at 21rem, so they wrap
+                rather than truncate: a path clipped in the middle names a file
+                nobody can find. */}
+            <span className="min-w-0 flex-1 break-words text-ink">{row.label}</span>
+            <span className="shrink-0 tabular-nums">{fmtTokens(row.tokens)}</span>
+            <span className="w-9 shrink-0 text-right tabular-nums">
+              {row.share === null ? "—" : `${Math.round(row.share * 100)}%`}
+            </span>
+          </div>
+          <div>
+            {row.kind || "not stated"}
+            {/* The whole reason a path is worth looking at: four copies of one
+                file is a fact about the conversation, where its size alone is
+                not. Winnow attaches no count for one sighting, so an absent
+                `repeat` is silence rather than "once". */}
+            {row.repeat !== null && <> · seen {row.repeat}&times;</>}
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
