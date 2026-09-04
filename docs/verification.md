@@ -2329,15 +2329,23 @@ through before trusting this unattended:
   failures**, of which 2 are `modelFromForm` in `budgetPayload.test.ts` — that a
   blank field contributes no `model` key at all, and that a typed one is trimmed
   and otherwise sent verbatim), `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
-  build` (exit 0), and `/runs/new` rendered against `next dev` in this container
-  on a throwaway `DATA_DIR`: the Model row draws in *What to work on* under
-  *Folder*, and its placeholder reads `Claude Code's own default` on an install
-  whose `settings.defaultModel` is unset. What was **not**: that a typed model
-  reaches `--model` on a real spawn and that the CLI runs on it — the fact the
-  whole feature exists to deliver; the inspector's `Model` section, which needs a
-  run row and creating one starts a billed agent; the placeholder on an install
-  that *has* a default; the copied-run seed carrying `run.model`; `docker
-  compose`; and any narrow viewport.
+  build` (exit 0), and both pages rendered against `next dev` in this container
+  on a throwaway `DATA_DIR`. `/runs/new`: the Model row draws in *What to work
+  on* under *Folder*, and its placeholder reads `Claude Code's own default` on an
+  install whose `settings.defaultModel` is unset. `/runs/[id]`: two rows planted
+  directly in that database — one with `model = 'claude-opus-5'` and an agent
+  whose own model is `claude-sonnet-5`, one with `model = NULL` and an agent with
+  none — draw a `Model` section in *How it was set up*, above `Agent` and two
+  regions below `Against its limits`, reading `This run` / `Its agent` as
+  `claude-opus-5` / `claude-sonnet-5` and `Claude Code's own default` / `the
+  run's own`. Planting a row rather than starting one is the whole of why that
+  could be checked at all: creating a run here starts a billed agent.
+
+  What was **not**: that a typed model reaches `--model` on a real spawn and that
+  the CLI runs on it — the fact the whole feature exists to deliver, and the one
+  thing no fixture can stand in for; the placeholder on an install that *has* a
+  default; the copied-run seed carrying `run.model`; `docker compose`; and any
+  narrow viewport.
 
   One environment note for the next run that tries this: `next dev` has to be
   given `NODE_ENV=development` explicitly. Under this container's
