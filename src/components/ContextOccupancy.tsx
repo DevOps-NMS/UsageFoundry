@@ -1190,6 +1190,7 @@ function DetailRows({
                 `repeat` is silence rather than "once". */}
             {row.repeat !== null && <> · seen {row.repeat}&times;</>}
           </div>
+          {row.children.length > 0 && <DetailRows rows={row.children} nested />}
         </li>
       ))}
     </ul>
