@@ -1,7 +1,11 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { LiveTelemetry } from "./LiveTelemetry";
+import {
+  LiveTelemetry,
+  LiveTelemetryAside,
+  LiveTelemetryTotals,
+} from "./LiveTelemetry";
 import type { TelemetryWindowDTO } from "../lib/apiTypes";
 
 /**
@@ -124,6 +128,69 @@ test("a run with a status wears it, so the dash is not what every cell says", ()
 test("nothing is described as working when no run is", () => {
   const html = renderToStaticMarkup(
     <LiveTelemetry telemetry={windowOf({ workingRunCount: 0 })} now={NOW} />,
+  );
+  assert.doesNotMatch(html, /working/);
+});
+
+/**
+ * The aside is the same claim at the one place it is hardest to make. In the
+ * band, a lost separation sentence leaves a first-party figure under its own
+ * heading, four thousand pixels from a meter. Beside the meters it leaves one
+ * against the other with nothing in between, which is the arithmetic the
+ * provenance bands were built to make impossible — and the top of the page is
+ * where a figure gets quoted from.
+ */
+test("the aside's figure never appears without the statement that it is not an addend", () => {
+  const html = renderToStaticMarkup(
+    <LiveTelemetryAside telemetry={windowOf()} now={NOW} />,
+  );
+  assert.match(html, /\$2\.43/, "the first-party total is the card's subject");
+  // The same three claims the band's footnote carries, and the one word that
+  // has to differ: beside the meters, "above" would point at the page header.
+  assert.match(html, /Not added to the meters beside it/);
+  assert.match(html, /transcript-derived/);
+  assert.match(html, /budget guard reads the transcripts, never this/);
+});
+
+test("the aside names the source of its figure, not just the figure", () => {
+  const html = renderToStaticMarkup(
+    <LiveTelemetryAside telemetry={windowOf()} now={NOW} />,
+  );
+  // A dollar amount in the top row with no provenance on it is read as one more
+  // reading of the window the card next to it meters. The title is what says
+  // otherwise before the footnote is reached, so it is pinned separately.
+  assert.match(html, /Live from runs — first-party/);
+});
+
+test("both cards draw one reading of the totals, not two", () => {
+  const telemetry = windowOf();
+  // Rendered standalone and looked for verbatim inside each card: the assertion
+  // is not that the two agree today but that there is one component producing
+  // them, which is the only form of "cannot disagree" that survives an edit to
+  // either card. Re-inlining the figures into either one fails this.
+  const totals = renderToStaticMarkup(
+    <LiveTelemetryTotals telemetry={telemetry} now={NOW} />,
+  );
+  assert.ok(
+    renderToStaticMarkup(
+      <LiveTelemetry telemetry={telemetry} now={NOW} />,
+    ).includes(totals),
+    "the band draws the shared totals",
+  );
+  assert.ok(
+    renderToStaticMarkup(
+      <LiveTelemetryAside telemetry={telemetry} now={NOW} />,
+    ).includes(totals),
+    "and the aside draws the same ones",
+  );
+});
+
+test("nothing is described as working on the aside when no run is", () => {
+  const html = renderToStaticMarkup(
+    <LiveTelemetryAside
+      telemetry={windowOf({ workingRunCount: 0 })}
+      now={NOW}
+    />,
   );
   assert.doesNotMatch(html, /working/);
 });
