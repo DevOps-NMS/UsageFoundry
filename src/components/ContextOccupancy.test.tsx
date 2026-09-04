@@ -165,8 +165,7 @@ test("a single reading is a reading, and says it has no shape yet", () => {
   assert.match(html, /aria-valuenow="50"/);
   assert.doesNotMatch(html, /hatched/);
   // But nothing about a trend may be implied.
-  assert.match(html, /One reading so far; the line appears from the second/);
-  assert.match(html, /one reading so far/, "and the same in the text alternative");
+  assert.match(html, /one reading so far/, "said in the text alternative");
   assert.match(html, /No shape yet/);
 });
 
@@ -513,7 +512,7 @@ test("the residual is the top band whatever its size", () => {
   assert.deepEqual(bands, ["tool traffic", "conversation", "unattributed"]);
 });
 
-test("a lone reading is a column and says the area starts at the second", () => {
+test("a lone reading is drawn as a column and not as an area", () => {
   // One point stretched across the box asserts this composition held for the
   // whole span, which is the one claim a single measurement cannot make — and
   // it is indistinguishable from a flat run.
@@ -527,14 +526,14 @@ test("a lone reading is a column and says the area starts at the second", () => 
   // The column is 44 wide about the midpoint of a 320 box: 138 to 182.
   assert.match(html, /M138 /, "the column is drawn at its own width");
   assert.match(html, /H182/);
-  assert.match(html, /One reading so far; the area appears from the second/);
 });
 
-test("the two windows are never presented as one figure", () => {
-  // The load-bearing sentence of this half of the panel. Both charts are in
-  // tokens, both are the same measure, and they are anchored differently — the
-  // sample excludes sidechains and winnow does not — so they part company for
-  // as long as a sub-agent runs and the arithmetic across them typechecks.
+test("the stack is drawn against winnow's own window", () => {
+  // Both charts are in tokens, both are the same measure, and they are anchored
+  // differently — the sample excludes sidechains and winnow does not — so they
+  // part company for as long as a sub-agent runs. Scaling the bands onto the
+  // sample's figure would make them agree by construction, and the bands would
+  // then apportion a total they were never measured against.
   const html = render(
     series({
       composition: [reading()],
@@ -542,11 +541,8 @@ test("the two windows are never presented as one figure", () => {
       compositionAbsence: null,
     }),
   );
-  assert.match(html, /last priced request in the transcript/);
-  assert.match(html, /the last <em>main-thread<\/em> one/);
-  assert.match(html, /subtract\s+neither from the other/);
-  // And the stack is drawn against its own window: 50,000 of winnow's 100,000
-  // is half the box, where against the sample's 60,000 it would be five sixths.
+  // 50,000 of winnow's 100,000 is half the box, where against the sample's
+  // 60,000 it would be five sixths.
   assert.match(html, /the window was 100\.0k tokens/);
 });
 

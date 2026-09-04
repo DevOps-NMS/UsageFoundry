@@ -789,25 +789,11 @@ function CompositionStack({
         </Table>
       </div>
 
-      <p className="mt-1.5 max-w-[68ch] text-xs leading-snug text-ink-muted">
-        {/* The load-bearing sentence of this half of the panel. The two windows
-            are the same measure from different anchors, and the whole reason
-            this is said here rather than in a note somewhere on the page is
-            `LiveTelemetry`'s: a separation stated once, away from the figure,
-            is a separation nobody reads at the moment they need it. */}
-        Winnow&rsquo;s reading of the same window, apportioned. It anchors on the
-        last priced request in the transcript where the figure above anchors on
-        the last <em>main-thread</em> one, so the two totals part company for as
-        long as a sub-agent runs. Take each against its own chart and subtract
-        neither from the other.
-        {lone && <> One reading so far; the area appears from the second.</>}
-        {readingCount > readings.length && (
-          <>
-            {" "}
-            The newest {readings.length} of {readingCount} readings.
-          </>
-        )}
-      </p>
+      {readingCount > readings.length && (
+        <p className="mt-1.5 max-w-[68ch] text-xs leading-snug text-ink-muted">
+          The newest {readings.length} of {readingCount} readings.
+        </p>
+      )}
     </>
   );
 }
@@ -994,13 +980,6 @@ function Caption({
           marked.
         </>
       ),
-    });
-  }
-
-  if (samples.length === 1) {
-    clauses.push({
-      key: "single",
-      node: <>One reading so far; the line appears from the second.</>,
     });
   }
 
