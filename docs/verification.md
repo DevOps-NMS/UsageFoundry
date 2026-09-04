@@ -5126,31 +5126,73 @@ through before trusting this unattended:
   is the check `conventions.md` requires because Tailwind emits nothing at all
   for a spelling it does not know.
 
-  **Seen with my own eyes, but not in the app.** The component was rendered
-  through `renderToStaticMarkup` against synthetic readings, dressed in the built
-  stylesheet at the inspector's 21rem, and screenshotted in both themes:
-  a band with a two-level subtree, the residual, a band with no children in a
-  reading that has a tree elsewhere, a reading with no tree at all, a finished
-  run, and both absences. That is what found the one real defect in this change —
-  `DetailRows` did not recurse, so the artefact level was silently missing while
-  the tool level rendered perfectly and nothing failed. It is **not** the app: no
-  route, no poll, no real winnow output, and no pointer or keyboard ever went
-  near it, since a static render has no event loop.
+  **Operated in the real app, with a browser.** Not Docker — that is still the
+  gap below — but the whole stack under it: `npm run build`, then `npm start`
+  against a scratch `DATA_DIR` seeded with one run, 22 samples, a prune receipt
+  and two composition readings whose newest carries a two-level tree, then
+  Chromium driven over `/runs/<id>`. So this is the built bundle, the real route,
+  the real `/api/runs/[id]` handler, the real DTO and real client hydration in
+  the inspector column — everything a compose run would exercise except the
+  container and a real winnow. Twenty-four assertions, all passing:
 
-  **Not yet verified by hand:** every interaction. Nothing has *clicked* a legend
-  row, tabbed to one, pressed Space or Enter on it, clicked a band in the stack,
-  or pressed a second band while one was open — the open states above were
-  produced by seeding the initial state, so the toggle, the close-on-repick and
-  the at-most-one rule are proven by reading the reducer and not by operating it.
-  The `aria-live` line has never been heard. No real winnow tree has been drawn:
-  the labels, `kind` words and repeat counts are all invented, so nothing
-  confirms that a real depth-3 body produces rows that fit 21rem — the longest
+  - Six legend `<button>`s, none pressed and no detail region on arrival.
+  - A click opens exactly one; `aria-pressed` lands on the row that was clicked;
+    `aria-controls` appears and names a node that is in the document.
+  - The region says when the reading was taken, draws the artefact level under
+    the tool that read it, shows `seen 4×`, and contains no "other" row.
+  - The top level came back largest first — `Read`, `Bash`, `mcp__winnow__context`
+    — from rows SQLite handed over in insertion order.
+  - The shortfall is stated: "These rows come to 89% of tool traffic".
+  - Picking a second band swaps the region and leaves exactly one pressed; the
+    first row lets go. Picking the open one again closes it and the region goes.
+  - `prefix`, which has no children in that reading, says so rather than
+    rendering an empty list.
+  - Reached by **Tab**, a row matches `:focus-visible` and wears `2px solid` at
+    `2px` offset; **Space** opens it and **Enter** closes it; Tab walks all six
+    in order, top to bottom.
+  - No element in the region carries a class matching `danger|warn|success|critical`.
+
+  Five more against the same server, at 420px and with the run put back to
+  `running` so the page polls: a legend row measures exactly **44px** under `md`
+  and opens there; the page fetched three times in eleven seconds with a region
+  open; the region was still open afterwards and its rows were byte-identical, so
+  the poll neither closes it nor reorders it. That narrow pass is also where the
+  **live** wording was seen for real — "at the one reading taken 29m ago", older
+  than the "read just now" at the top of the card, which is the whole point of
+  the sentence.
+
+  Both themes were then photographed inside the real inspector column at 1440px.
+  Before that, a `renderToStaticMarkup` harness dressed in the built stylesheet
+  covered the states the seeded run cannot reach — the residual, a reading with
+  no tree at all, and both absences — and it is what found the one real defect in
+  this change: `DetailRows` built each row's children and never rendered them, so
+  the artefact level was silently missing while the tool level rendered perfectly
+  and nothing failed.
+
+  **A third environment trap, worth the next agent's time.** `npm run dev` cannot
+  compile CSS in this container: `@tailwindcss/postcss` dies with `EvalError:
+  Code generation from strings disallowed for this context`, `globals.css` then
+  fails webpack's parse at the first `@layer`, and every page answers 500. It is
+  not the repository and not a stale `.next` — `next build` is clean on the same
+  tree. Use `npm run build && npm start` to look at the app here. The server also
+  needs `UF_AUTH_TOKEN` set to a scratch value (never the one in `.env`) and the
+  browser sending `authorization: Bearer <it>`, since `middleware.ts` gates every
+  route; and each Bash call gets its own network namespace, so the server and
+  whatever talks to it must be started in **one** call.
+
+  **Not yet verified by hand:** `docker compose up --build`, which is the real
+  smoke test and is unavailable here. No **real winnow tree** has been drawn —
+  every label, `kind` and repeat count above was seeded by hand, so nothing
+  confirms that a genuine depth-3 body produces rows that fit 21rem; the longest
   synthetic path wrapped mid-token, which is `break-words` behaving correctly and
-  may still read badly against real paths. The shortfall sentence has never been
-  seen against a store that actually dropped a tail, because the per-node cap has
-  not fired on this install. And the region has not been seen inside the run page
-  at all: not in the inspector column, not under `max-md:`, and not with the
-  three-second poll re-rendering underneath it.
+  may still read badly against real paths. The shortfall sentence has not been
+  seen against a store that actually dropped a tail, because
+  `COMPOSITION_CHILDREN_PER_NODE` has never fired on this install — the 89% above
+  comes from seeded children that do not sum, which exercises the sentence but
+  not the cap. The `aria-live` line has never been heard by a screen reader. And
+  the poll never delivered a *changed* composition under an open region: the
+  seeded readings are fixed, so what was proven is that eleven seconds of polling
+  leaves the rows alone, not what a genuinely new reading does to them.
 
   **What a human should run.** `docker compose up --build`, open a run with
   context pruning switched on that has been going long enough for a composition
@@ -5162,11 +5204,10 @@ through before trusting this unattended:
   of the band, each with its own files indented under it and `exact · seen 4×`
   where a file was read more than once. Click the same row again: it closes.
   Click a different row while it is open: the panel stays put and its contents
-  change, and only one row is washed. Then do all of that from the keyboard —
-  Tab to a legend row, Space, Tab on — and confirm the focus ring is visible on
-  every row. Check that no row is ever red or amber, that no row says "other",
-  and that the reading's age in the header is *older* than the "read just now"
-  at the top of the card, which is the whole point of that sentence.
+  change, and only one row is washed. The one thing no seeded run could show:
+  leave a region open on a run that is still growing until a **new composition
+  reading** lands, and confirm the rows swap to it without the region closing and
+  without the age in its header going stale.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
