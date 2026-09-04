@@ -5062,6 +5062,55 @@ through before trusting this unattended:
   measured: no reading has been taken while a sub-agent was running, which is the
   one condition under which the two figures are supposed to disagree.
 
+- **The reading moved to depth 3, and what a depth-3 body actually looks like
+  (2026-09-04).** The entry above verified the app's argv at `--depth 1`; the
+  reading is now `--depth 3` and the body was measured rather than inferred from
+  the flag's help text. `python -m winnow context <transcript> --depth 3 --json`
+  was run at the pinned ref against the four largest transcripts on this machine
+  — 7.2 MB, 9.2 MB, 10.4 MB and 12.9 MB of JSONL — and returned **18 KB to 29 KB**
+  of JSON carrying **72 to 110 sub-nodes**, with **at most 29 children under any
+  one parent**. That settles the open question in `contextComposition`'s stdout
+  bound, which said in as many words that its 4 MB was written against a future
+  `--depth` and not against depth 1: **4 MB is still right**, with two orders of
+  headroom, because the body grows with the number of *distinct* artefacts and
+  not with the transcript. `COMPOSITION_CHILDREN_PER_NODE` at 64 therefore does
+  not fire on anything on this install and exists for the session that reads a
+  thousand files.
+
+  The node shape was read off those bodies rather than assumed. A node carries
+  `label`, `tokens`, `kind`, `share`, `note` and `children`, and **there is no
+  count field**: the repeat is welded onto the label by `context.py`'s
+  `decorate()` as the key, two spaces, `×`, and the count, from the third level
+  down and only where the count exceeds one — `Edit  ×43`, `$ grep  ×19`,
+  `/workspace/repo/src/lib/db.ts  ×3`. `splitRepeat` lifts it back off, anchored
+  on the whole label so it is a no-op on anything winnow did not decorate,
+  including `--by-path`'s `path  ×3 (Read ×2, Edit)` override, which this app
+  does not ask for.
+
+  Three things were then driven end to end against the real pinned winnow at
+  `/opt/winnow`, compiled, on a temporary `DATA_DIR`. `contextComposition` itself,
+  through `winnow safe run -- context <path> --depth 3 --json`, returned a full
+  three-level tree on a real 1.3 MB transcript. `recordComposition` followed by
+  `contextOccupancy` over two readings of the same body left **six** rows in
+  `context_composition_children` — the newest reading's tree and no other — with
+  the earlier reading's slices carrying empty `children`, the `×3` arriving as
+  `repeat: 3` beside a once-read file's `null`, and the same second-level key
+  (`Read results`) under two different provenances resolving to two subtrees
+  rather than one. And `sweepRunEvents` over a settled run past the horizon
+  reported **10** — four bands plus six tree rows — and emptied the children
+  table, which is the clause that stops a tree outliving the run it describes.
+
+  **Not yet verified by hand:** everything the entry above leaves open is still
+  open — no row has been written by the live tick, and the anchor divergence is
+  still read out of two implementations rather than measured. Two more are this
+  change's own. Nothing has drawn the tree: the detail view that renders these
+  children is the next run on this branch, so the path from
+  `context_composition_children` through `attachChildren` to a page is proven by
+  a compiled round-trip and by types, and not by looking at anything. And the
+  per-node cap has never fired on real output — the case that pins it feeds 200
+  synthetic children in shuffled order, because no transcript on this machine
+  produces more than 29 under one parent.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
