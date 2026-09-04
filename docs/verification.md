@@ -2412,6 +2412,70 @@ through before trusting this unattended:
   loads. It was still run with `UF_ALLOW_NO_AUTH=1`, so what this checked is that
   the edge bundle loads at all, not that the sign-in path works.
 
+- **The chat naming a model: `propose_run`, `save_template`, the proposal card.**
+  `chat_proposals.model`, the two tool schemas, `planProposal`'s precedence and
+  the row the card draws — the third of the three runs on this branch, and the
+  one where a model rather than a person writes the value. `npm run typecheck`
+  exits 0, `npm test` is 2,139 tests over 326 suites with 0 failures (three more
+  than before, all on `planProposal`), and `env -u
+  __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exits 0.
+
+  The three new tests were each run against the implementation they exist to
+  refuse rather than only against the one that ships, which is the only way a
+  precedence test says anything: the two that assert the proposal's model wins
+  fail on the `template?.model ?? null` read they replaced, and the one that
+  reads a blank model as naming none fails on a plain `proposal.model ??
+  template?.model ?? null` chain — where `""` or `"   "` off a trimmed argument
+  becomes `--model ""` and never reaches the template's own answer.
+
+  **The migration was checked against a database with rows in it, twice, not
+  only against a fresh one.** A scratch script under `/tmp` opened a data
+  directory through the app's own `db()`, seeded three `chat_proposals` rows a
+  real install would have — templated pending, untemplated pending carrying a
+  frozen `guards_json`, and one already approved against a run id — then
+  `ALTER TABLE chat_proposals DROP COLUMN model` to make the file look like one
+  the previous build wrote. Reopening it ran `migrate()` for real: the column
+  came back, all three rows were still there, every `model` was NULL, the frozen
+  guard blob was byte-identical and the approved row kept its status. A second
+  reopen changed nothing, which is the idempotence `migrate()` is written for.
+  The second shape is the one the `PROPOSAL_BASE_COLUMNS` warning is about: the
+  table was replaced by hand with the pre-`relaxProposalTemplate` schema —
+  `template_id TEXT NOT NULL`, none of the columns added since — with a row in
+  it, and the boot rebuilt it, kept the row, relaxed `template_id` and then
+  added `model` on top. That is the ordering the warning names, and it holds
+  because `model` was deliberately left out of `PROPOSAL_BASE_COLUMNS`; naming
+  it there would have made the rebuild's copy list mention a column the old
+  table does not have.
+
+  **Both tools were driven for real, in-process rather than over HTTP.** The
+  sandbox this run was executed in gives every shell its own network namespace,
+  so a `next dev` started in one call is unreachable from the next — measured,
+  `ECONNREFUSED` on `127.0.0.1` from both `curl` and `node` while the server
+  reported ready. So `/api/mcp`'s own `POST` was called directly with a
+  capability minted by `mintCapability({kind:"chat", …})` and a real
+  `Authorization: Bearer` header, against a seeded template naming
+  `claude-sonnet-5`. `propose_run` with `model: "haiku"` answered *"It runs on
+  haiku"* and wrote `haiku` to the row; the same call without the field wrote
+  null and said nothing about a model; `model: "   "` wrote null, so whitespace
+  never becomes a flag. `save_template` with `model: "opus"` set it and said so
+  in the thread and in the tool result, the same call with the field omitted
+  left `opus` alone across two further writes — the wholesale-replace trap the
+  `agentId` note warns about — and `model: ""` cleared it back to null with the
+  thread reading *"It names no model, so runs from it use your default."* Every
+  one of those results also carried *"Its guards are unchanged: acceptEdits, own
+  checkout, 3 work-cycle limit"*, which is the sentence the field had to not
+  disturb. `chatDTO` over the same rows then carried `model: "haiku"` on the
+  card that named one and `null` on the two that did not.
+
+  **Not checked by hand:** the card itself, rendered. The model row is verified
+  by type, by the DTO above and by the JSX being a plain truthy guard, but no
+  browser drew it, for the loopback reason above — `docker compose up --build`,
+  which is where a person would look at it, is also unavailable here. Nor was
+  the text a real orchestrator reads: whether a model given these two
+  descriptions names a sensible model, or reads "the model can be set" as
+  licence to argue for guards, is a question about a live turn and nothing here
+  answers it.
+
 - **The paged runs list and quick open's search, in a browser.** `/api/runs`
   now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
   drives all five from the Older runs fold, and quick open asks the route for
