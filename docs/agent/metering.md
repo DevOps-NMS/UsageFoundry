@@ -263,3 +263,27 @@ the noise floor is a property of the task, not of the loop.
 
 This supersedes the earlier one-run reading of 0.89x-3.09x, which is what a
 single pair bought and was correctly refused as a result.
+
+
+**The same comparison against a competent script.** A loop that never resumes
+is a weak opponent, and beating it proves mostly that resuming works. So the
+arm was run again as somebody who knew what they were doing would write it -
+`claude -p --continue`, five runs, same task and corpus:
+
+| arm | n | mean | completed | per module |
+|---|---:|---:|---:|---:|
+| this engine | 5 | $0.5688 | **12/12 every run** | **$0.0474** |
+| script, `--continue` | 5 | $0.7861 | 8/12 every run | $0.0983 |
+| script, no resume | 5 | $1.6847 | 8/12 every run | $0.2106 |
+
+Resuming closes about half the gap, exactly as the cold-start figure predicts.
+The engine is still **2.07x cheaper per unit of work than the competent
+script**, the distributions still do not overlap ($0.0431-$0.0531 against
+$0.0878-$0.1170), and the exact two-tailed probability of that separation at
+n=5,5 is again **0.0079**.
+
+The clearest way to state it: the engine did **50% more work for 28% less
+money**. Both scripts stopped at eight of twelve modules in every single run;
+the engine finished twelve in every single run. What separates them is not the
+per-token price of anything - it is that the cycle contract keeps going until
+the work is done, and the loop is what makes that cheap rather than expensive.
