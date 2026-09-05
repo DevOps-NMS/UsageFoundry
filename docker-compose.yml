@@ -146,7 +146,9 @@ services:
       # when the switch above is on. Defaulted to the conventional location
       # under the first workspace mount, so an operator who cloned it beside
       # their other projects sets nothing.
-      WINNOW_FILTER_PATH: "${WINNOW_FILTER_PATH:-/workspace/winnow}"
+      # Blank lets the entrypoint choose: a workspace checkout if there is
+      # one, else the winnow this image already vendors at /opt/winnow/src.
+      WINNOW_FILTER_PATH: "${WINNOW_FILTER_PATH:-}"
       # Loopback port for the filter. Not 8787: the Discord relay binds that
       # inside this same container, and the second process to want a port gets
       # nothing rather than a degraded service.

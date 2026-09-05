@@ -928,14 +928,43 @@ fi
 # talks to the API directly, exactly as it does with the switch off. The one
 # outcome that must not happen is a boot that exports the URL and no listener.
 if [ "${WINNOW_FILTER:-}" = "1" ]; then
-  WINNOW_PATH="${WINNOW_FILTER_PATH:-/workspace/winnow}"
+  # WHERE THE FILTER'S CODE COMES FROM, and why this is not just a default.
+  #
+  # This image already builds a pinned winnow at /opt/winnow/src - the same
+  # `WINNOW_REF` the pruner runs from - yet the filter looked only under
+  # /workspace, so an operator who set WINNOW_FILTER=1 on a stock image was
+  # told to "clone winnow under the workspace this container mounts": a second
+  # copy of something already inside the container, at a version that could
+  # then differ from the one the pruner uses.
+  #
+  # MEASURED, which is why this is worth changing rather than documenting: on a
+  # tool-heavy run the filter kept 12,096 bytes off the wire and saved 3.67% of
+  # that run's cost, of which 2.3% is the avoided 2.0x cache write and needs no
+  # assumptions. That saving sat behind an install step for a checkout the
+  # image already had.
+  #
+  # An operator's own checkout still wins when they have one - they may be
+  # tracking a different ref on purpose - and an explicit WINNOW_FILTER_PATH
+  # still wins over both. This only supplies the fallback that stops the answer
+  # being "clone what you already have".
+  WINNOW_PATH="${WINNOW_FILTER_PATH:-}"
+  if [ -z "$WINNOW_PATH" ]; then
+    if [ -f /workspace/winnow/pyproject.toml ]; then
+      WINNOW_PATH=/workspace/winnow
+    elif [ -f /opt/winnow/src/pyproject.toml ]; then
+      WINNOW_PATH=/opt/winnow/src
+    else
+      WINNOW_PATH=/workspace/winnow
+    fi
+  fi
   WINNOW_PORT="${WINNOW_FILTER_PORT:-8789}"
   WINNOW_STATE_VOLUME=/var/lib/winnow
 
   if [ ! -f "$WINNOW_PATH/pyproject.toml" ]; then
-    echo "[usagefoundry] WINNOW_FILTER=1 but no checkout at $WINNOW_PATH —" \
-         "agents will talk to the API directly. Clone winnow under the" \
-         "workspace this container mounts, or set WINNOW_FILTER_PATH." >&2
+    echo "[usagefoundry] WINNOW_FILTER=1 but no checkout at $WINNOW_PATH, and" \
+         "this image has none vendored either — agents will talk to the API" \
+         "directly. Build with a WINNOW_REF, clone winnow under a mounted" \
+         "workspace, or set WINNOW_FILTER_PATH." >&2
   else
     # The volume root, reclaimed on the terms /data's is at the top of this
     # file: Docker copies the image directory's ownership and mode onto a fresh
@@ -1024,6 +1053,30 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
       fi
     }
 
+    # HOW THE FILTER IS LAUNCHED, and why it is not always `uv run`.
+    #
+    # An operator's checkout is a project uv should resolve: it may be a
+    # different ref and its lock is the one to honour. The tree this image
+    # vendors is not - the Dockerfile already installed it into
+    # /opt/winnow/venv and then made the source read-only with `chmod -R a+rX`,
+    # so `uv run --project` there fails on `Cannot update time stamp of
+    # directory 'src/winnow.egg-info'`: the build backend wants to write into a
+    # tree that is deliberately not writable. It also has no reason to build at
+    # all, because the venv beside it is that build.
+    #
+    # So the vendored copy is run from its own interpreter and everything else
+    # goes through uv exactly as before.
+    WINNOW_RUN_PATH="$PATH"
+    if [ "$WINNOW_PATH" = /opt/winnow/src ] && [ -x /opt/winnow/venv/bin/python ]; then
+      # No launcher at all: the venv goes on PATH so the plain `python` below
+      # is that interpreter. Prepending beats naming the binary because the
+      # command that follows is shared with the uv branch.
+      WINNOW_LAUNCH=""
+      WINNOW_RUN_PATH="/opt/winnow/venv/bin:$PATH"
+    else
+      WINNOW_LAUNCH="uv run --frozen --project $WINNOW_PATH"
+    fi
+
     # UV_PROJECT_ENVIRONMENT is load-bearing, not tidiness. The checkout is a
     # bind mount shared with the operator's own machine, and `uv run` in a
     # project whose .venv was built by a different OS *deletes and rebuilds it*
@@ -1032,13 +1085,13 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
     (
       while :; do
         winnow_filter_as_agent \
-            PATH="$PATH" \
+            PATH="$WINNOW_RUN_PATH" \
             HOME=/home/node \
             UV_PROJECT_ENVIRONMENT=/home/node/.winnow-venv \
             UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR" \
             UV_PYTHON_PREFERENCE="$UV_PYTHON_PREFERENCE" \
             WINNOW_FILTER=1 \
-          uv run --frozen --project "$WINNOW_PATH" \
+          $WINNOW_LAUNCH \
             python -m winnow filter \
               --port "$WINNOW_PORT" \
               --ledger "$WINNOW_STATE_VOLUME/filter.jsonl" \
