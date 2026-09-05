@@ -190,3 +190,20 @@ So the defensible statement about this engine against that loop is the sum of
 what has been priced rather than compared: **resume is worth about 13.3% here,
 the intake filter 3.67-8.76%**, and the rest is inside a noise floor these runs
 cannot see through.
+
+
+**What one tool costs.** From the same prefix observation - tools 30,923 B
+across 14 definitions - a tool definition averages **2,209 bytes, about 552
+tokens**. Written at 2.0x on every fresh session that is **$0.0055 per tool per
+run**, and $0.0773 for all fourteen.
+
+It is paid whether the run uses the tool or not, because the definition is in
+the prefix before the agent has read anything. Dropping five tools from an
+agent that does not need them saves $0.0276 a run - **$2.76 per hundred runs** -
+with no effect on what the agent can do with the ones it kept.
+
+That makes `agents.ts` a metering surface as well as a permissions one. An
+agent carries a role and its tools ride with it; this is what they cost to
+carry. It is the only lever in this file paid on **every** run rather than in
+proportion to the work, which is why it is the cheapest one here even though it
+is the smallest.
