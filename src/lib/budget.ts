@@ -74,6 +74,16 @@ export interface BudgetPolicy {
    */
   maxRunCostUSD: number | null;
   /**
+   * Stop when this run costs more than this multiple of its own task's median.
+   *
+   * Null or <= 1 is off. Relative where `maxRunCostUSD` is absolute: a ceiling
+   * has to be set high enough for the worst legitimate run, which leaves it
+   * blind to a run that is merely three times its own normal - and MEASURED on
+   * this loop, the same task varies 2.28x run to run, so the tail is where the
+   * money is rather than the mean.
+   */
+  maxRunCostFactor: number | null;
+  /**
    * Stop when this run alone has consumed this many tokens. null = no limit.
    *
    * No in-cycle equivalent: the CLI's own ceiling is denominated in dollars,
@@ -125,6 +135,15 @@ export interface RunProgress {
    */
   spentGuardUSD?: number;
   spentGuardTokens?: number;
+  /**
+   * What this run's own task has cost before, or null when too little is known.
+   *
+   * Passed in rather than read here, so `evaluateBudget` stays a pure function
+   * of numbers - the query that builds it belongs to the caller, and a guard
+   * that reached into the database would be untestable in exactly the place it
+   * most needs to be tested.
+   */
+  costBaseline?: { medianUSD: number; samples: number } | null;
   startedAt: number | null;
 }
 
@@ -135,10 +154,19 @@ export type BudgetMeter = {
   unit: "fraction" | "usd" | "tokens" | "count" | "minutes";
 };
 
+import { outlierVerdict } from "./costBaseline";
+
 export type BudgetStopCode =
   | "weekly_fraction"
   | "session_fraction"
   | "run_cost"
+  /**
+   * Not a ceiling: this run has left its own task's cost distribution. Its own
+   * code because "you set a limit and reached it" and "this is three times what
+   * this task normally costs" are different things to have happened, and an
+   * operator triaging a stopped run wants to know which.
+   */
+  | "run_cost_outlier"
   | "run_tokens"
   | "iterations"
   | "duration"
@@ -528,6 +556,19 @@ export function evaluateBudget(
     );
   }
 
+  // AFTER the absolute ceiling and before the token one. A run that has hit
+  // both should be reported as having hit the limit it was given, because that
+  // is the one the operator set on purpose; the outlier code is for the run
+  // nobody set anything for.
+  const outlier = outlierVerdict({
+    spentUSD,
+    baseline: progress.costBaseline ?? null,
+    factor: policy.maxRunCostFactor ?? null,
+  });
+  if (outlier.over) {
+    return block("run_cost_outlier", outlier.reason);
+  }
+
   if (policy.maxRunTokens !== null && spentTokens >= policy.maxRunTokens) {
     return block(
       "run_tokens",
@@ -651,6 +692,7 @@ export function normalizePolicy(raw: unknown): BudgetPolicy {
     maxWeeklyFraction: frac(o.maxWeeklyFraction),
     maxSessionFraction: frac(o.maxSessionFraction),
     maxRunCostUSD: num(o.maxRunCostUSD, null),
+    maxRunCostFactor: num(o.maxRunCostFactor, null),
     maxRunTokens: num(o.maxRunTokens, null),
     maxIterations,
     maxDurationMinutes: num(o.maxDurationMinutes, null),

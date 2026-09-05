@@ -138,6 +138,7 @@ const PROBES: Record<keyof Settings, Probe> = {
       budget: {
         maxWeeklyFraction: null,
         maxSessionFraction: null,
+        maxRunCostFactor: null,
         maxRunCostUSD: null,
         maxRunTokens: null,
         maxIterations: 3,

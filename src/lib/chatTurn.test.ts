@@ -247,6 +247,7 @@ describe("approving a card whose defaults moved under it", () => {
       maxIterations: 3,
       maxDurationMinutes: null,
       maxRunCostUSD: 5,
+      maxRunCostFactor: null,
     },
   };
   /** What it says by the time the operator clicks: wider in every field. */
@@ -258,6 +259,7 @@ describe("approving a card whose defaults moved under it", () => {
       maxIterations: null,
       maxDurationMinutes: 600,
       maxRunCostUSD: null,
+      maxRunCostFactor: null,
     },
   };
 

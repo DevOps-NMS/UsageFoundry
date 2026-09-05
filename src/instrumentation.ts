@@ -62,7 +62,21 @@ export async function register() {
       process.exit(1);
     }
 
-    const { reconcileOnBoot, shutdownRuns } = await import("./lib/orchestrator");
+    const { backfillTaskSignatures, reconcileOnBoot, shutdownRuns } =
+      await import("./lib/orchestrator");
+
+    // Once, at boot, and idempotent. Without it the relative cost guard is
+    // silent on an install that already has the history to speak from - which
+    // is the operator most likely to try the feature and conclude it does
+    // nothing. Bounded, so a very large `runs` table costs one bounded pass
+    // per boot rather than one long one.
+    const backfilled = backfillTaskSignatures();
+    if (backfilled) {
+      console.log(
+        `[usagefoundry] gave ${backfilled} existing run(s) a task signature, ` +
+          `so the relative cost guard can read their history.`,
+      );
+    }
 
     // Which arrangement this install is in, said once, before anything spawns.
     // The unseparated case is a *silent* absence of a boundary — the app looks

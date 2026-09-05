@@ -840,6 +840,10 @@ export const DEFAULT_CHAT_GUARDS: RunGuards = {
     maxIterations: 4,
     maxDurationMinutes: 60,
     maxRunCostUSD: 5,
+    // Off by default: a relative guard on an install with no history would
+    // be a guard with nothing to say, and one that spoke anyway would be
+    // speaking from an anecdote.
+    maxRunCostFactor: null,
     maxRunTokens: null,
     maxWeeklyFraction: null,
     maxSessionFraction: null,

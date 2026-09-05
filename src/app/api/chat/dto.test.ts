@@ -27,6 +27,7 @@ function budget(over: Partial<BudgetPolicy> = {}): BudgetPolicy {
     maxWeeklyFraction: null,
     maxSessionFraction: null,
     maxRunCostUSD: null,
+    maxRunCostFactor: null,
     maxRunTokens: null,
     maxIterations: null,
     maxDurationMinutes: null,
@@ -40,6 +41,7 @@ const CAPPED = budget({
   maxIterations: 12,
   maxDurationMinutes: 45,
   maxRunCostUSD: 4,
+  maxRunCostFactor: null,
 });
 
 test("the default guard set is spelled out in full", () => {

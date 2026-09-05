@@ -760,6 +760,17 @@ function migrate(db: Database.Database) {
   // depend on SQLite's collation of nulls, and every existing row would have
   // to be backfilled before the queue behaved predictably.
   addColumn(db, "runs", "priority", "INTEGER NOT NULL DEFAULT 0");
+  // WHAT MAKES TWO RUNS THE SAME TASK, for the relative cost guard.
+  //
+  // A hash of folder + normalised prompt, written once at creation. Stored
+  // rather than computed on read because the guard runs before every work
+  // cycle and a LIKE over `prompt` would be a table scan on the hot path; and
+  // hashed rather than raw because `runs.prompt` for a private repository is a
+  // complete product brief, and this value ends up in an index.
+  addColumn(db, "runs", "task_signature", "TEXT");
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS runs_task_signature ON runs(task_signature, status)",
+  );
   addColumn(db, "runs", "session_id", "TEXT");
   addColumn(db, "runs", "work_dir", "TEXT");
   addColumn(db, "runs", "isolation", "TEXT");

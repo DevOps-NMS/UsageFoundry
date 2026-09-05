@@ -383,6 +383,7 @@ export async function runDreamingNight(opts: {
       permissionMode: "bypassPermissions",
       budget: {
         maxRunCostUSD: settings.dreamingMaxCostUSD,
+        maxRunCostFactor: null,
         maxIterations: MAX_CYCLES,
         maxWeeklyFraction: null,
         maxSessionFraction: null,

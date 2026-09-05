@@ -21,6 +21,7 @@ import { dataDirRefusal, mayWriteDataDir, requireDataDir } from "./serverLock";
 import { childCredentials, chownForChild } from "./privsep";
 import { currentSandbox, sandboxRefusal } from "./sandbox";
 import { ensureSandboxMountPoints } from "./sandboxMountPoints";
+import { baselineFrom, taskSignature, type CostBaseline } from "./costBaseline";
 import { db } from "./db";
 import {
   getSettings,
@@ -3718,8 +3719,8 @@ export function createRun(input: CreateRunInput): RunRow {
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
             work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch,
-            continues_run, agent, file_cost_notice, origin, origin_ref)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            continues_run, agent, file_cost_notice, origin, origin_ref, task_signature)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -3748,6 +3749,7 @@ export function createRun(input: CreateRunInput): RunRow {
         costNotice || null,
         input.origin,
         input.originRef ?? null,
+        taskSignature(folder, prompt),
       );
 
     const addLink = db().prepare(
@@ -7429,6 +7431,9 @@ export async function startRun(id: string): Promise<void> {
           spentGuardUSD: spentUSD + spentGuardEstUSD,
           spentGuardTokens: spentTokens + spentEstTokens,
           startedAt,
+          // What this task has cost before. Read here rather than inside the
+          // guard so `evaluateBudget` stays a pure function of numbers.
+          costBaseline: costBaselineFor(run),
         },
         Date.now(),
       );
@@ -10465,6 +10470,62 @@ export function setRunPriority(
       `priority keep their arrival order.`,
   );
   return { ok: true, priority: clamped };
+}
+
+/**
+ * What this run's own task has cost before.
+ *
+ * COMPLETED runs only, and never this run. A failed run's spend is real money
+ * but it is not what the task costs to do - including them would drag the
+ * median toward the price of giving up, and the guard would then admit the
+ * expensive run it exists to catch.
+ *
+ * Keyed on `taskSignature`, which normalises whitespace and case, so an
+ * operator who reflowed the prompt keeps their baseline. Bounded to the most
+ * recent `BASELINE_WINDOW` because a task's cost moves as the repository does,
+ * and a median over a year of history is a fact about last year.
+ */
+export const BASELINE_WINDOW = 20;
+
+/**
+ * Give every run written before the column a signature, once.
+ *
+ * Without this the relative guard is silent on an existing install until three
+ * new runs of a task have completed - which is exactly the install that has
+ * the history to speak from, and exactly the operator who would conclude the
+ * feature does nothing. The hash is over columns the row already carries, so
+ * this invents nothing; it only computes what would have been written had the
+ * column existed.
+ *
+ * Bounded and idempotent: only rows where it is null, and a second boot finds
+ * none. Runs at open rather than lazily so the cost is one startup rather than
+ * a stall on whichever cycle happened to ask first.
+ */
+export function backfillTaskSignatures(limit = 5000): number {
+  const rows = db()
+    .prepare(
+      "SELECT id, folder, prompt FROM runs WHERE task_signature IS NULL LIMIT ?",
+    )
+    .all(limit) as { id: string; folder: string; prompt: string }[];
+  if (!rows.length) return 0;
+  const write = db().prepare("UPDATE runs SET task_signature = ? WHERE id = ?");
+  const all = db().transaction((batch: typeof rows) => {
+    for (const r of batch) write.run(taskSignature(r.folder ?? "", r.prompt ?? ""), r.id);
+  });
+  all(rows);
+  return rows.length;
+}
+
+export function costBaselineFor(run: RunRow): CostBaseline | null {
+  const signature = taskSignature(run.folder, run.prompt);
+  const rows = db()
+    .prepare(
+      "SELECT spent_usd FROM runs WHERE task_signature = ? AND id != ? " +
+        "AND status IN ('completed','done') AND spent_usd > 0 " +
+        "ORDER BY created_at DESC LIMIT ?",
+    )
+    .all(signature, run.id, BASELINE_WINDOW) as { spent_usd: number }[];
+  return baselineFrom(rows.map((r) => r.spent_usd));
 }
 
 export function setRunAside(id: string, aside: boolean): SetAsideOutcome {

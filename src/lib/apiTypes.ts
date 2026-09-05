@@ -1024,6 +1024,8 @@ export interface BudgetPolicyDTO {
   maxWeeklyFraction: number | null;
   maxSessionFraction: number | null;
   maxRunCostUSD: number | null;
+  /** The relative guard: a multiple of this task's own median, or null. */
+  maxRunCostFactor: number | null;
   maxRunTokens: number | null;
   /** null = no cap on work cycles. Legal only alongside maxDurationMinutes. */
   maxIterations: number | null;
