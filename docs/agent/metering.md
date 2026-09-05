@@ -237,3 +237,29 @@ The corollary is worth stating too: a *large* effect is cheap to measure. If
 this engine really were 3x the loop it replaces, nine runs per arm would show
 it - about $15. That experiment is affordable and has not been run; the earlier
 0.89x-3.09x range is what one run per arm buys.
+
+
+**The comparison, run properly.** The power table above says a large effect is
+cheap to measure, so it was measured. Five pairs, alternating, same task, same
+twelve-file corpus, four cycles each, both priced by the model's own reported
+cost:
+
+| | mean | range | completed | per module |
+|---|---:|---:|---:|---:|
+| this engine | $0.5688 | $0.5173-$0.6378 | **12/12 every run** | **$0.0474** |
+| naive `claude -p` | $1.6847 | $1.3763-$1.8574 | 8/12 every run | $0.2106 |
+
+**4.44x cheaper per unit of work, and the distributions do not overlap** - the
+engine's worst run is 3.2x better than the naive loop's best. The exact
+two-tailed probability of complete separation at n=5,5 is **0.0079**. The
+engine finished the work in every run; the naive loop finished two thirds of it
+in every run.
+
+Within-arm spread here is 1.23x and 1.35x, far tighter than the 2.28x-3.48x
+measured on the other corpus, which is why five pairs settle it: the task is
+bounded by a cycle cap and by twelve files rather than by the agent's
+judgement. That is worth knowing when designing any further comparison here -
+the noise floor is a property of the task, not of the loop.
+
+This supersedes the earlier one-run reading of 0.89x-3.09x, which is what a
+single pair bought and was correctly refused as a result.
