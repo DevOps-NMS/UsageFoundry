@@ -144,20 +144,26 @@ not a tidiness preference; it is the cheapest lever in this file, because it is
 paid on every run whether the run uses those tools or not.
 
 
-**And what all of that is worth, against the alternative.** A cost figure means
-nothing without something to compare it to, so: the same task, the same
-twelve-file corpus, the same four cycles, run once through this engine and once
-through the thing it replaces - a scripted `claude -p` loop that starts a fresh
-session each cycle. Both priced by the model's own reported cost.
+**And what all of that is worth, against the alternative — not yet known.**
+The same task, corpus and cycle count was run once through this engine and once
+through what it replaces, a scripted `claude -p` loop starting a fresh session
+each cycle. Priced by the model's own reported cost, per module completed so
+the two are comparable when one finishes more:
 
 | | cost | done | per module |
 |---|---:|---:|---:|
 | naive `claude -p`, fresh each cycle | $1.1090 | 8 / 12 | $0.1386 |
-| this engine, resume + intake filter | $0.5380 | **12 / 12** | **$0.0448** |
+| this engine, 4 cycles | $0.5380 | 12 / 12 | $0.0448 |
+| this engine, 8 cycles | $1.2497 | 8 / 12 | $0.1562 |
 
-**3.09x cheaper per unit of work**, and it finished the job the naive loop did
-not. The mechanism is the one the rest of this section measures: resume pays
-the cold start once rather than four times, and the filter kept 15,986 bytes
-off the wire on that run. One run per arm, one task, one corpus - a reading
-rather than a rate, and the honest way to read it is that the design choices
-already in this app are what the gap is made of.
+**Two runs of this engine on one corpus differ by 3.48x**, and the naive loop
+falls between them. So the honest reading of these three runs is a gap of
+**0.89x to 3.09x** - a range that straddles one, and therefore does not
+establish that either is cheaper. It is a demonstration that the comparison is
+runnable and that the per-module figure is the right unit; it is not a result.
+
+Resolving it needs replication against a within-arm spread of 3.48x, which is
+the same wall the intake filter's A/B hit and the reason that mechanism was
+priced from its ledger instead. The deterministic parts of the gap - resume
+paying one cold start rather than four, at a median 16% of a session - can be
+priced the same way and are the honest thing to quote until then.
