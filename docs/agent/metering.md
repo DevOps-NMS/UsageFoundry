@@ -207,3 +207,33 @@ agent carries a role and its tools ride with it; this is what they cost to
 carry. It is the only lever in this file paid on **every** run rather than in
 proportion to the work, which is why it is the cheapest one here even though it
 is the smallest.
+
+
+**Why every figure above was priced rather than compared.** The six
+identical-task runs give a coefficient of variation of **0.296**. Putting that
+through a two-sample power calculation says how many runs an A/B needs to see
+an effect of a given size at 80% power:
+
+| effect | runs per arm |
+|---:|---:|
+| 10% | 151 |
+| 13.3% | 88 |
+| 20% | 42 |
+| 30% | 20 |
+| 50% | 9 |
+
+The resume effect is 13.3%, so **seeing it by comparison needs about 88 runs
+per arm** - at roughly $0.55 a run that is over $95 for one number. Pricing it
+from the cold starts in the ledger took a single run and no comparison at all.
+
+That asymmetry is the argument for the method used throughout this section, and
+it is a property of the workload rather than of anyone's patience: agent runs
+vary by 2.28x to 3.48x on identical input, so any mechanism worth less than
+about 30% is invisible to an A/B at any budget an operator would accept. The
+mechanisms in this app are worth 3-13%. **They can only be measured
+deterministically.**
+
+The corollary is worth stating too: a *large* effect is cheap to measure. If
+this engine really were 3x the loop it replaces, nine runs per arm would show
+it - about $15. That experiment is affordable and has not been run; the earlier
+0.89x-3.09x range is what one run per arm buys.
