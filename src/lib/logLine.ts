@@ -494,6 +494,19 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
       };
     }
 
+    case "deliver": {
+      // The other exit, and it reads as one line rather than as a status: the
+      // question an operator has on this page is "where did this work go", and
+      // the answer is a URL somebody else can open. `land` says it entered
+      // their checkout; this says it left the machine.
+      return {
+        voice: "system",
+        tone: "ok",
+        label: "delivered",
+        text: `${p.branch ?? "the branch"} pushed to ${p.remote ?? "the remote"}, pull request #${p.number ?? "?"} opened against ${p.base ?? "the target"} — ${p.url ?? ""}`.trim(),
+      };
+    }
+
     case "land": {
       // Before `deleted`, and it is deliberately not one: the retention sweep
       // removes the *directory* and leaves the branch and every commit on it
@@ -676,6 +689,9 @@ export const LOG_FILTER_OPTIONS: readonly {
  * run.
  */
 const EVENT_GROUP: Record<RunEventDTO["kind"], "agent" | "tool" | "app"> = {
+  // Beside `land` for the same reason: an exit is something the app did, not
+  // something the agent or a tool did.
+  deliver: "app",
   assistant: "agent",
   subagent: "agent",
   tool: "tool",

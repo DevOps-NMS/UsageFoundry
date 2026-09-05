@@ -65,6 +65,8 @@ const RESET_AT = Date.now() - 60 * 60 * 1000;
 
 const PROBES: Record<keyof Settings, Probe> = {
   sessionCostLimit: { send: 42.5 },
+  // Trimmed on the way in, so what comes back is not what was sent.
+  landVerifyCommand: { send: "  npm test  ", stored: "npm test" },
   weeklyCostLimit: { send: 300 },
   sessionTokenLimit: { send: 1_000_000 },
   weeklyTokenLimit: { send: 9_000_000 },

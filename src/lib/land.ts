@@ -1,8 +1,11 @@
 import fs from "node:fs";
+import { runVerify } from "./landGate";
+import { openPullRequest, planDelivery } from "./delivery";
 import path from "node:path";
 import { git } from "./git";
 import { db } from "./db";
 import { commitDiff, type DiffFile } from "./diff";
+import { GITHUB_TOKEN } from "./config";
 import { getSettings } from "./settings";
 import {
   assistRefusal,
@@ -978,6 +981,24 @@ export async function landRun(
   landing.add(folder);
 
   try {
+    // THE OPERATOR'S OWN CHECK, BEFORE ANYTHING MOVES.
+    //
+    // Everything above this line is about the checkout — clean, on target,
+    // nobody working in it. None of it is about the work. `landVerifyCommand`
+    // is the one place an operator can say "not unless this passes", and it
+    // has to run before the merge rather than after: a failing check on an
+    // already-merged branch is a report, and what was asked for is a refusal.
+    //
+    // Off by default, and an unset command is not a check that passed. On the
+    // branch, not the target, because the question is whether THIS work is
+    // good — so it runs against the run's own tree, which is where the agent
+    // left it.
+    const verify = await runVerify(state.checkout!.path, getSettings().landVerifyCommand);
+    if (!verify.passed) {
+      landing.delete(folder);
+      return { ok: false, reason: verify.reason };
+    }
+
     // Read before the merge: after a squash there is nothing in the target's
     // history that points back at these commits, and this is what makes them
     // identifiable afterwards.
@@ -2766,4 +2787,97 @@ export async function branchInventory(
       .sort((a, b) => a.repoLabel.localeCompare(b.repoLabel)),
     checkouts: await checkoutStores(roots),
   };
+}
+
+
+/**
+ * Push a run's branch to its checkout's remote and open a pull request on it.
+ *
+ * The exit `M1` names as missing. Reached from one endpoint on one press and
+ * from nowhere in the run loop: an outward-facing action taken by a loop is a
+ * different product from one taken by a person, and this app has been careful
+ * everywhere else about which of those it is.
+ *
+ * The push is ordinary and never forced. `githubEnv()` supplies the credential
+ * the same way it does for an agent's own push, so nothing new enters the trust
+ * boundary — what is new is that the app may use a capability its children
+ * already had.
+ *
+ * The verify gate runs first, and deliberately the same one Land uses: an
+ * operator who has said "not unless this passes" has not said anything about
+ * which exit the work leaves by. Publishing an unverified branch to a remote
+ * other people can see would be a wider version of exactly what they refused.
+ */
+export async function deliverRun(
+  runId: string,
+  o: { title?: string; body?: string } = {},
+): Promise<
+  | { ok: true; url: string; number: number }
+  | { ok: false; reason: string }
+> {
+  const run = getRun(runId);
+  if (!run) return { ok: false, reason: "No such run." };
+
+  const state = await landState(runId);
+  if (!state) return { ok: false, reason: "This run has no branch to deliver." };
+
+  const folder = state.checkout?.path;
+  if (!folder) return { ok: false, reason: "This run has no checkout to push from." };
+
+  const remoteUrl = (
+    await git(folder, ["remote", "get-url", "origin"], NO_CLOCK)
+  ).stdout.trim();
+
+  const plan = planDelivery({
+    token: GITHUB_TOKEN,
+    remoteUrl,
+    branch: state.branch,
+    target: state.target,
+  });
+  if (!plan.ok) return { ok: false, reason: plan.reason };
+
+  const verify = await runVerify(folder, getSettings().landVerifyCommand);
+  if (!verify.passed) return { ok: false, reason: verify.reason };
+
+  // Never `--force`, and the upstream is set so a second press is an ordinary
+  // fast-forward rather than a new branch.
+  const push = await git(
+    folder,
+    ["push", "--set-upstream", "origin", `${plan.head}:${plan.head}`],
+    NO_CLOCK,
+  );
+  if (!push.ok) {
+    return {
+      ok: false,
+      reason: `The branch could not be pushed: ${push.stderr.trim() || "git refused"}.`,
+    };
+  }
+
+  const opened = await openPullRequest({
+    remote: plan.remote,
+    head: plan.head,
+    base: plan.base,
+    title: o.title?.trim() || `${run.prompt.split("\n")[0].slice(0, 72)}`,
+    body:
+      o.body?.trim() ||
+      `Opened by UsageFoundry from run \`${run.id.slice(0, 8)}\`.\n\n` +
+        `The task this run was given:\n\n> ${run.prompt.slice(0, 1500)}\n`,
+  });
+  if (!opened.ok) return { ok: false, reason: opened.reason };
+
+  // On the run's own timeline, the way a land is: this is the other exit, and
+  // the question "where did this work go" is asked on the run's page.
+  emitRunEvent({
+    runId,
+    ts: Date.now(),
+    kind: "deliver",
+    payload: {
+      branch: plan.head,
+      base: plan.base,
+      remote: `${plan.remote.owner}/${plan.remote.repo}`,
+      url: opened.pr.url,
+      number: opened.pr.number,
+    },
+  });
+  return { ok: true, url: opened.pr.url, number: opened.pr.number };
 }

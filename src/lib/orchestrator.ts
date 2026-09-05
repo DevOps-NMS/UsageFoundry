@@ -194,6 +194,8 @@ export interface RunRow {
   max_iterations: number;
   iterations: number;
   created_at: number;
+  /** Higher goes first; `created_at` breaks every tie. Default 0. */
+  priority: number;
   started_at: number | null;
   finished_at: number | null;
   stop_reason: string | null;
@@ -385,6 +387,9 @@ export interface RunEvent {
     | "result"
     | "handoff"
     | "land"
+    // The other exit. `land` is work entering the operator's own
+    // checkout; `deliver` is it leaving the machine for a remote.
+    | "deliver"
     | "review"
     | "error";
   payload: Record<string, unknown>;
@@ -3849,6 +3854,32 @@ export function createRun(input: CreateRunInput): RunRow {
  * money. Counting parked runs against a cap of 1 would starve everything else
  * for hours.
  */
+/**
+ * The order the queue is considered in: priority first, then age.
+ *
+ * Every selection over `runs` used to be ordered by `created_at` alone, which
+ * made the `queuePosition` the UI shows a report of a position nothing could
+ * change — an operator who needed one run before another could only cancel and
+ * recreate it, losing that run's history and its spend.
+ *
+ * Age is still the tie-break and the default priority is 0, so an install that
+ * never sets one queues in exactly the order it does today. That is the
+ * property worth having: this is not a new scheduler, it is the old one with a
+ * lever, and with the lever untouched the behaviour is unchanged.
+ *
+ * Pure, and separated from `selectPromotable` because it is the half that
+ * decides whose work runs first when an allowance is nearly spent, and it
+ * fails silently: a comparator that quietly ignored `priority` would look
+ * exactly like one that worked, on every install where nobody had set one.
+ */
+export function queueOrder<T extends { priority?: number | null; created_at: number }>(
+  runs: readonly T[],
+): T[] {
+  return [...runs].sort(
+    (a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.created_at - b.created_at,
+  );
+}
+
 export function selectPromotable(
   runs: readonly RunRow[],
   cap: number | null,
@@ -3870,7 +3901,12 @@ export function selectPromotable(
   const promote: string[] = [];
   let live = reserved.length;
 
-  for (const run of runs) {
+  // Priority order, not arrival order. `reserved` above is computed from the
+  // RUNNING runs and does not depend on this, but the loop below claims folders
+  // as it goes — so ordering here is also what decides which of two runs
+  // wanting the same folder gets it, which is exactly what an operator setting
+  // a priority is asking for.
+  for (const run of queueOrder(runs)) {
     if (run.status !== "queued") continue;
     if (cap !== null && live >= cap) break;
 
@@ -10394,6 +10430,43 @@ export type SetAsideOutcome = { ok: true } | { ok: false; reason: string };
  * line, and folding it in here would make one function that both marks and
  * kills depending on a status it read itself.
  */
+/** The band a priority is clamped into, so one run cannot be unreachable. */
+export const PRIORITY_MIN = -100;
+export const PRIORITY_MAX = 100;
+
+/**
+ * Move a queued run up or down the queue without losing it.
+ *
+ * Clamped rather than free: an unbounded integer invites `Number.MAX_SAFE_INTEGER`
+ * as a way of saying "definitely first", and the row after it is then
+ * unreachable by any value a person would type. A hundred each way is more
+ * ordering than an install with a concurrency cap of four can express.
+ *
+ * Only the ORDER changes. Nothing here starts, stops or skips a run, and a
+ * priority on a run that is already running means nothing until it is queued
+ * again — which is why this refuses nothing based on status: there is no state
+ * in which recording an operator's preference is wrong, only states where it
+ * has no effect yet.
+ */
+export function setRunPriority(
+  id: string,
+  priority: number,
+): { ok: true; priority: number } | { ok: false; reason: string } {
+  const run = getRun(id);
+  if (!run) return { ok: false, reason: "No such run." };
+  if (!Number.isFinite(priority)) {
+    return { ok: false, reason: "A priority has to be a number." };
+  }
+  const clamped = Math.max(PRIORITY_MIN, Math.min(PRIORITY_MAX, Math.trunc(priority)));
+  db().prepare("UPDATE runs SET priority = ? WHERE id = ?").run(clamped, id);
+  log(
+    id,
+    `Priority set to ${clamped}. Higher runs are promoted first; runs of equal ` +
+      `priority keep their arrival order.`,
+  );
+  return { ok: true, priority: clamped };
+}
+
 export function setRunAside(id: string, aside: boolean): SetAsideOutcome {
   const run = getRun(id);
   if (!run) return { ok: false, reason: "No such run." };

@@ -60,3 +60,29 @@
 **Getting rid of a branch is two doors, and only the careful one is called Delete.** `deleteBranch` still refuses anything git cannot see as merged — that refusal is all that stands between a stray click and work that exists nowhere else — and `purgeBranch` is the deliberate other one, for the attempt that went nowhere and the slot it is holding hostage. It destroys committed work by design, so the caller has to **name the branch back**: that echo is not authentication and never selects anything (the row still decides what is deleted), it is what stops a request aimed at one branch from landing on another, and what forces the interface to spell out what goes. It force-removes the checkout, which `deleteBranch` will not do, and counts the commits and the uncommitted paths *before* anything is removed so the sentence afterwards says what was lost. Neither door is offered for an active run, and the UI never shows both at once.
 
 **A conflict is resolved on the run's branch, never in the operator's checkout.** `resolveConflicts` merges the *target into the branch* — the opposite direction from landing — inside the run's own checkout when it still holds that branch, and otherwise a throwaway `<slug>-resolve-<id8>` slot that is removed either way. That slot is named for the **run** and not for the repository, which is the half that was missing: the store is shared by every run in the repository, creating the slot begins by force-removing whatever stands at the path, and a resolution holds its checkout for as long as its agent runs — so one `<slug>-resolve` for the whole repository meant a second resolution deleting a live one's working tree with a billed child editing files inside it, and that one's `after` handler then aborting the merge it found in its place. The guard on the way in is per run for the same reason it always was, and `resolveConflicts` now holds a claim on the run from entry until `startAssist` has written the row `assistRunning` reads, since the two callers that reach it — the merge queue draining a repository and the operator's own button — can otherwise both pass a guard that is asking about a row neither has inserted yet. A resolution that goes badly therefore costs a branch nobody has landed yet. The agent resolves **text only**: it runs `acceptEdits` (not `bypassPermissions`) and is told not to run git, because the app stages and commits *after* checking that no marker survived. `unresolvedFiles` treats an unreadable file as unresolved, and any failure ends in `merge --abort` with the branch exactly as it was — an agent that reports success having left `<<<<<<<` in a file is the specific failure this ordering exists to catch. When it succeeds the branch contains the target, so landing becomes a fast-forward and still goes through every check above. `hasConflictMarkers` matches only the two labelled markers, never a bare `=======`, which is a markdown heading underline.
+
+
+**The check in front of Land, and what an empty one means.** Every other
+condition Land enforces is about the *checkout* — clean, on target, nobody
+working in it. `landVerifyCommand` is the only one about the **work**: set it
+and a non-zero exit refuses the land, leave it empty and Land behaves exactly
+as it did before the field existed. An empty command is not a check that
+passed, and neither is one that could not be parsed — `landGate.landVerdict`
+returns `passed: false` for a malformed command precisely because the operator
+asked for a gate, and handing them an open door because their string was wrong
+is the failure the field exists to prevent. It is argv and never a shell line:
+`parseVerifyCommand` refuses shell metacharacters rather than escaping them,
+for the reason `security.md` gives about spawn argv generally. It runs on the
+run's own tree, as the child uid, before anything merges — a failing check on
+an already-merged branch is a report, and what was asked for was a refusal.
+
+**The other exit.** `deliverRun` pushes a run's branch and opens a pull request
+on the checkout's GitHub remote. It is reached from one endpoint on one press
+and from nothing in the run loop: an outward-facing action taken by a loop is a
+different product from one taken by a person. It never force-pushes, it runs
+the same verify gate Land does — an operator who said "not unless this passes"
+has said nothing about which exit the work leaves by — and with
+`UF_GITHUB_TOKEN` unset it refuses, which is the honest default for a feature
+that publishes. The run's timeline carries it as `deliver`, beside `land`:
+`land` is work entering the operator's own checkout, `deliver` is it leaving
+the machine.

@@ -151,6 +151,12 @@ async function putHandler(req: Request) {
 
   const patch: Partial<Settings> = {};
 
+  // A string, trimmed, and never validated into a pass here: `landGate` is the
+  // one place that decides whether a command is runnable, and duplicating that
+  // judgement in the route is how the two drift into disagreeing.
+  if ("landVerifyCommand" in body)
+    patch.landVerifyCommand = String(body.landVerifyCommand ?? "").trim();
+
   if ("sessionCostLimit" in body)
     patch.sessionCostLimit = optionalNumber(body.sessionCostLimit);
   if ("weeklyCostLimit" in body)

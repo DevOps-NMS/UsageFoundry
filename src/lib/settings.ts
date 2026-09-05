@@ -375,6 +375,21 @@ export interface Settings {
    */
   resolveVerifyTools: string[];
   /**
+   * A command that must exit 0 before Land will merge a run's branch.
+   *
+   * Empty is off, and off is the default: an empty command is not a check that
+   * passes, it is no check, and Land behaves exactly as it did before this
+   * existed. Set, a non-zero exit REFUSES the land rather than warning about
+   * it — the whole value of the field is that it is the thing an operator
+   * cannot forget to read.
+   *
+   * argv, never a shell line. `landGate.parseVerifyCommand` refuses shell
+   * metacharacters instead of escaping them, for the reason
+   * `docs/agent/security.md` gives about spawn argv generally; an operator who
+   * wants `a && b` names a script here instead.
+   */
+  landVerifyCommand: string;
+  /**
    * Gitignored files copied into a fresh checkout, newest-wins glob order.
    *
    * A worktree contains committed work only, so an isolated agent would
@@ -869,6 +884,7 @@ export const DEFAULTS: Settings = {
   maxConcurrentRuns: 4,
   maxConcurrentAssists: 2,
   resolveVerifyTools: [],
+  landVerifyCommand: "",
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationCopyGlobsByRepo: {},
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,

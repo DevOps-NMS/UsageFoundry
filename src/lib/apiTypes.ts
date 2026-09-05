@@ -1948,6 +1948,9 @@ export interface RunEventDTO {
     | "result"
     | "handoff"
     | "land"
+    // The other exit. `land` is work entering the operator's own
+    // checkout; `deliver` is it leaving the machine for a remote.
+    | "deliver"
     | "review"
     | "error"
     | "replay-complete";
