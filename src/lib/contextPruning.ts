@@ -8,6 +8,7 @@ import { BYTES_PER_TOKEN } from "./fileCostNotice";
 // Client-safe presentation helper, no node builtins behind it — see format.ts.
 import { fmtTokens } from "./format";
 import { opsLog, recordOpsEvent } from "./ops";
+import { childCredentials } from "./privsep";
 import {
   CACHE_WRITE_1H_MULTIPLIER,
   CACHE_WRITE_5M_MULTIPLIER,
@@ -1483,6 +1484,66 @@ export async function pruneTranscript(
 }
 
 /** The child, as its own function so `pruneTranscript` reads as the sequence it is. */
+
+/**
+ * Hand a transcript back to the agent's uid after winnow has been over it.
+ *
+ * The pruner is the app's own maintenance and runs as the server, which is
+ * root — `describeSeparation()` states the arrangement at boot as "children run
+ * as 1000:1000 … server as 0". Every winnow verb here that writes takes the
+ * transcript with it, so the file the *next* work cycle has to resume from is
+ * left `root:root 0600` and the agent, a different uid, cannot read it.
+ *
+ * MEASURED, 2026-09-05, on a real run against a real account. The same task with
+ * `contextPruning` on failed at cycle 2 in 0 ms for $0.14 with
+ * `No conversation found with session ID: …` on stderr; with it off the run
+ * completed for $0.41. Changing nothing but the file's owner — `chown
+ * root:root → node:node` on that exact session — turned the refusal into a
+ * successful resume. The cost is not one cycle: the orchestrator reports
+ * `error_during_execution` and fails the whole run, and because the failing
+ * cycle bills $0 while the cycle before it reports success, nothing in the app
+ * says what happened.
+ *
+ * `chownForChild` is the existing answer to precisely this shape and its own
+ * docstring names the disease — "the server is root, so anything it writes …
+ * lands root-owned and the agent … cannot touch it" — but lists only the
+ * worktree store and the seeded config files. The transcript is the third place
+ * and was missing from it.
+ *
+ * It does NOT throw, and that is the one deliberate difference from
+ * `chownForChild`. This runs on the pruning path, whose rule is stated at
+ * `observePlan`: an observation that could end a cycle is worth less than not
+ * taking it. A failure here leaves exactly the behaviour that exists today, so
+ * refusing loudly would trade a silent bug for a loud one on a path that must
+ * not end a run.
+ *
+ * The chown is injected so the unit test can assert both directions without
+ * being root and without a real transcript.
+ */
+export function restoreTranscriptOwnership(
+  transcriptPath: string,
+  deps: {
+    credentials?: () => { uid?: number; gid?: number };
+    chown?: (target: string, uid: number, gid: number) => void;
+  } = {},
+): { restored: boolean; reason: string | null } {
+  const credentials = deps.credentials ?? childCredentials;
+  const chown = deps.chown ?? fs.chownSync;
+  const { uid, gid } = credentials();
+  if (uid === undefined || gid === undefined) {
+    // Not privilege-separated: the server and the agent are one uid and there
+    // is nothing to hand over. Reported rather than silent so a caller can tell
+    // "no separation" from "the chown failed".
+    return { restored: false, reason: "not privilege separated" };
+  }
+  try {
+    chown(transcriptPath, uid, gid);
+    return { restored: true, reason: null };
+  } catch (err) {
+    return { restored: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function spawnPrune(
   transcriptPath: string,
   tier: PruneTier,
@@ -1496,6 +1557,11 @@ function spawnPrune(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      // Before the caller moves on: winnow ran as the server, so the transcript
+      // the next cycle resumes from may now be root-owned. Unconditional
+      // because a refusal still may have written, and cheap enough to pay on a
+      // path that already spawned a subprocess.
+      restoreTranscriptOwnership(transcriptPath);
       resolve(result);
     };
 
@@ -2793,6 +2859,10 @@ export function forkTranscript(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      // `fork --write` is the verb that rewrites the transcript outright, so
+      // this is the path where the ownership actually moves. Both the original
+      // and whatever the fork left behind are handed back to the child.
+      restoreTranscriptOwnership(transcriptPath);
       resolve(result);
     };
 
