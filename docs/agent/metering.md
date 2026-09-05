@@ -82,3 +82,26 @@ the bill. An operator reading a token chart is looking at the volume that costs
 a third and cannot see the term that decides their bill. `total` delegates to
 `costOf` rather than re-summing the four - the same arithmetic, once, so a
 receipt cannot disagree with the guard even in the last bits of a float.
+
+
+**Why cache writes are half the bill, and why that is not a defect.** MEASURED
+across 90 deduplicated frames: the median request writes **434** tokens and
+reads **22,286** - writes are 7.6% of the context they sit on, and exactly one
+request of ninety wrote more than 20k, which was the session's first. The
+prefix is not churning; those writes are the delta of one turn being cached so
+the next turn can read it.
+
+The cost follows from the multipliers rather than from any waste. A token
+admitted to the conversation is written once at 2.0x and then read at 0.1x on
+every later turn, so one 434-token write costs what 8,680 read tokens cost.
+That is why writes can be 7% of tokens and 48% of the bill while nothing is
+going wrong.
+
+**The lever this identifies is intake, not pruning.** Preventing a token from
+entering the conversation avoids the 2.0x write entirely; removing it after the
+fact pays an invalidation to do so, which is `1.9*S - 2*D` once against `0.1*D`
+per later turn. Measured from this direction, that is the same conclusion
+winnow reaches from its own corpus - its intake filter is worth more than its
+pruner and is positive in every session rather than 58% of them - and on this
+install `WINNOW_FILTER` is blank by default, so the mechanism that avoids the
+dearer term is the one an operator has to go and find.
