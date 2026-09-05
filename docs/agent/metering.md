@@ -167,3 +167,26 @@ the same wall the intake filter's A/B hit and the reason that mechanism was
 priced from its ledger instead. The deterministic parts of the gap - resume
 paying one cold start rather than four, at a median 16% of a session - can be
 priced the same way and are the honest thing to quote until then.
+
+
+**What can be said without replication.** The comparison above cannot resolve a
+gap of this size at one run per arm, but part of it does not need a comparison
+at all - the same reasoning that let the intake filter be priced from its
+ledger. A naive loop starts a session per cycle and pays a cold start each
+time; a resumed loop pays one.
+
+MEASURED on the four naive sessions: cold starts of $0.0761, $0.0875, $0.0169
+and $0.0168, totalling **$0.1973**, against **$0.0493** for a single session.
+The deterministic difference is **$0.1480, or 13.3%** of that run, and 13,746
+prefix tokens re-cached at 2.0x that a resumed loop writes once.
+
+Two of those four sessions wrote **no prefix at all**, which is worth knowing
+before assuming the naive loop pays full price every time: the API's prefix
+cache outlives a session, so back-to-back invocations inside the TTL inherit a
+warm one. The penalty is real but smaller than the arithmetic suggests, and it
+is a penalty on *cadence* rather than on starting a session as such.
+
+So the defensible statement about this engine against that loop is the sum of
+what has been priced rather than compared: **resume is worth about 13.3% here,
+the intake filter 3.67-8.76%**, and the rest is inside a noise floor these runs
+cannot see through.
