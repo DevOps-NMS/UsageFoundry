@@ -70,3 +70,15 @@
 - `cache_creation` splits into 5m (1.25×) and 1h (2×). Unsplit legacy records are attributed to the **cheaper** 5m bucket so ambiguity understates rather than overstates.
 - **The cache read multiplier is a property of the model, and `cacheReadMultiplierOf` is the only thing that may read it.** It was 0.1× everywhere until Claude Fable 5.1 and Claude Mythos 5.1 shipped at 0.025× — $0.25/MTok against their $10 input — and the error that produces is not small on this workload: cache reads are ~98% of the tokens and 60.7% of the bill, so pricing a 5.1 run at 0.1× overstates it by close to 4× and refuses it against a ceiling it never reached. Two things make it silent. The pair's *visible* columns are identical to Claude Fable 5's ($10 input, $50 output), so an entry that fell through to the shorter prefix would be right on both figures a person can check; and the multiplier is consumed in four places, not one — `costOf` here, plus the two counterfactuals in `contextPruning.ts` (`cacheSavedUSD`, and the pre-prune read `boundaryInvalidation` prices) and one in `intakeFilter.ts` (`cacheReadAvoidedUSD`), each of which held the constant directly and would have gone on being wrong after the table was right. They take the rate from the price they already resolved. `UNKNOWN_MODEL_PRICE` deliberately does **not** inherit the discount, for `guardCostOf`'s reason: the unknown rate must be the dearest plausible shape, and 0.1× on a $10 input is dearer than 0.025× on one. The **write** multipliers are still module constants because no model has departed from them; the first one that does takes this shape rather than a second mechanism.
 - Pricing changes over time: `resolvePrice(model, {at, speed})` is date- and speed-aware (Sonnet 5 intro pricing has an end date; `speed: "fast"` has its own table). Keep new rates in that shape rather than flattening them.
+
+
+**Where a bill went, and why a token chart does not show it.** `costSplitOf`
+breaks `costOf` into its four terms - input, output, cache read, cache write -
+and `costSharesOf` turns those into shares. It exists because the multipliers
+are 0.1x and 2.0x, a twentyfold ratio that no token count reveals: MEASURED
+across 90 deduplicated frames on one install, cache **writes** were 48.1% of
+the bill from 7% of the tokens, while reads were 92% of the tokens and 31.6% of
+the bill. An operator reading a token chart is looking at the volume that costs
+a third and cannot see the term that decides their bill. `total` delegates to
+`costOf` rather than re-summing the four - the same arithmetic, once, so a
+receipt cannot disagree with the guard even in the last bits of a float.
