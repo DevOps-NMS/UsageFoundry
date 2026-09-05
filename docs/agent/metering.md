@@ -121,3 +121,24 @@ The write term needs no assumptions and is the floor: **2.3% of the run**. The
 read term models each kept-out byte as read on every later request, which is an
 upper bound. `bytes / 4` is SPEC 6's token estimate and is flagged wherever it
 is used. One run, so this is a reading rather than a rate.
+
+
+**The fixed cost of starting a run, and what it is made of.** MEASURED over 12
+sessions: the first request is a median **16%** of a whole session's cost, and
+on short ones it is far more - one five-request session spent **55%** of its
+money before doing any work, and another 50%. Two sessions paid nothing at all,
+because they resumed into a warm cache.
+
+What that first request buys is the cached prefix, written once at 2.0x.
+winnow's prefix ledger names its parts: system **13,145 B**, tools **30,923 B**
+across 14 definitions. **The tool definitions are 70% of the prefix** - roughly
+7,730 tokens, about $0.077 at `claude-opus-5` input pricing, paid again on
+every fresh session before an agent has read a line of code.
+
+Two things follow, and neither is about pruning. Fewer, longer runs amortise a
+cost that short runs pay in full - the shape `docs/agent/run-lifecycle.md`
+already prefers for other reasons, now with a figure on it. And an agent's tool
+list is a per-run bill: `agents.ts` gives an agent a role, and the tools that
+ride with it are re-cached at 2.0x every time it starts. A leaner tool set is
+not a tidiness preference; it is the cheapest lever in this file, because it is
+paid on every run whether the run uses those tools or not.
