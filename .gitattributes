@@ -1,0 +1,35 @@
+# Line endings, and why this file has to exist.
+#
+# Git for Windows installs with `core.autocrlf=true`. Without a rule here, a
+# clone on Windows rewrites every text file in the working tree to CRLF —
+# including `docker-entrypoint.sh`, which the Dockerfile COPYs into the image
+# and runs as the entrypoint. A CRLF shebang is not a cosmetic difference: the
+# kernel reads the carriage return as part of the interpreter's name, and the
+# container exits immediately with `bad interpreter`. The app never starts, and
+# nothing in the failure names the cause.
+#
+# `Requirements` in the README names no operating system, and CI covers
+# linux/amd64 and linux/arm64 — so nothing else in this repository would catch
+# it, and the one person it happens to is a first-time Windows operator with no
+# reason to suspect their clone.
+#
+# `text=auto eol=lf` normalises on commit and checks out LF everywhere, which is
+# right for a project whose only execution target is a Linux container: there is
+# no file here that a Windows program needs CRLF to read, and the editors that
+# once required it have not for a decade.
+* text=auto eol=lf
+
+# Explicit for the executable ones, so a future `* -text` or a per-machine
+# autocrlf cannot quietly take them back. These are the files whose corruption
+# stops the container rather than showing up in a diff.
+*.sh        text eol=lf
+*.mjs       text eol=lf
+Dockerfile  text eol=lf
+docker-entrypoint.sh text eol=lf
+
+# Binary, so Git never tries to translate them.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

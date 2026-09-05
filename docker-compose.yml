@@ -338,7 +338,21 @@ services:
       # `sudo docker compose up` mounts root's. Docker creates a missing bind
       # source rather than refusing, so the symptom would be a dashboard
       # reporting zero usage — which is also what a quiet week looks like.
-      - ${HOME:?HOME is unset — run compose as your own user, not under sudo}/.claude:/home/node/.claude
+      #
+      # UF_CLAUDE_DIR first, and it exists for Windows. `Requirements` names no
+      # operating system and CI covers linux/amd64 and linux/arm64, so the only
+      # place the host OS reaches this file is here — and a PowerShell or `cmd`
+      # session sets USERPROFILE rather than HOME. Without a way through, a
+      # Windows operator following the README meets a refusal telling them not
+      # to use sudo, which is advice about a command they did not run and an
+      # account their system does not have. Git Bash and WSL set HOME and are
+      # unaffected either way.
+      #
+      # An explicit variable rather than `${HOME:-${USERPROFILE}}`: the fallback
+      # form silently mounts the wrong directory when both are set to different
+      # things, which is the same quiet-wrong-mount failure the `:?` above was
+      # chosen to prevent. This asks the operator to say it once, in .env.
+      - ${UF_CLAUDE_DIR:-${HOME:?set UF_CLAUDE_DIR in .env (Windows), or run compose as your own user and not under sudo (macOS, Linux)}}/.claude:/home/node/.claude
 
       # The code the agent is allowed to touch. Point these at parent
       # directories of the projects you want to work on.

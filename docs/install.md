@@ -830,3 +830,74 @@ rather than appending to it — and clear `UF_UNMOUNTED_WORKSPACES`, which is th
 one line that says the mount was actually made. Slots 5–8 are what the app
 detects; a slot numbered beyond that is not configuration anyone reaches by
 following `.env.example`, and is not detected.
+
+
+## Windows
+
+`Requirements` names no operating system and this app ships as one container,
+so the host OS reaches almost none of it. There is one exception, and it is the
+first thing a Windows operator meets.
+
+The `.claude` mount reads **`HOME`** from the shell that invokes compose.
+PowerShell and `cmd` set `USERPROFILE` instead, so `docker compose up` refuses
+to start with a message about `sudo` — a command you did not run, for an
+account Windows does not have. Git Bash and WSL both set `HOME` and are
+unaffected.
+
+Set `UF_CLAUDE_DIR` in `.env` instead:
+
+```
+UF_CLAUDE_DIR=C:/Users/you
+```
+
+Forward slashes: Docker Desktop accepts them, and a backslash here is read as
+an escape. The path is the directory *containing* `.claude`, exactly as `HOME`
+is on the other platforms, and it must already exist — Docker creates a missing
+bind source rather than refusing, and an empty one produces a dashboard of
+zeros, which is also what a quiet week looks like.
+
+`UF_WORKSPACE` takes a Windows path in the same form
+(`UF_WORKSPACE=C:/Users/you/code`). Everything else in `.env` is read inside
+the container and is unaffected by the host.
+
+### Line endings
+
+Git for Windows installs with `core.autocrlf=true`, which rewrites text files to
+CRLF as it checks them out. `docker-entrypoint.sh` is copied into the image and
+run as PID 1, and a CRLF shebang is not cosmetic: the kernel reads the carriage
+return as part of the interpreter's name and the container exits immediately
+with
+
+```
+/bin/sh: /usr/local/bin/uf-entrypoint: not found
+```
+
+which names a file that is plainly there. The missing thing is `/bin/sh\r`, and
+the message never says so.
+
+The `.gitattributes` at the repository root pins this tree to LF, so a fresh
+clone is already correct and nothing needs doing, and the attribute overrides
+`core.autocrlf`, so there is no global Git setting to change.
+
+A clone taken **before** that file existed can still be CRLF on disk. Rebuild
+the index against the attributes:
+
+```
+git rm --cached -r .
+git reset --hard
+```
+
+`file docker-entrypoint.sh` should then report `POSIX shell script` with no
+`CRLF line terminators`. Note that `git add --renormalize . && git checkout -- .`
+— the usual advice — does **not** fix it: renormalize updates the index, but
+checkout skips files whose stat data still looks current, so the CRLF copy in
+the working tree survives. Both commands were run against a clone made with
+`core.autocrlf=true`; only the pair above changed the bytes on disk.
+
+**What is not claimed here.** CI runs on linux/amd64 and linux/arm64, so
+neither Windows nor macOS is covered by an automated build. The mount above was
+verified by interpolation - `docker compose config` with `HOME` unset and
+`UF_CLAUDE_DIR` set resolves the bind source correctly, and with both unset it
+still refuses - but no run of this app has been executed on Windows by its
+author. If you are the first, the two things worth reporting are whether the
+container starts and whether the dashboard shows non-zero usage.
