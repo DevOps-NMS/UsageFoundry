@@ -1094,4 +1094,54 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
   fi
 fi
 
+# A HOOK THE OPERATOR CANNOT SEE FAIL.
+#
+# `$CLAUDE_CONFIG_DIR/settings.json` is the operator's own, carried in on the
+# bind mount, and it carries hooks — which the CLI runs by absolute path. A host
+# that configures hooks pointing at its own filesystem hands this container
+# commands that do not exist inside it, and the CLI's answer to a failing
+# `UserPromptSubmit` hook is to BLOCK THE PROMPT. Measured 2026-09-05: with a
+# host's hooks referencing /home/<user>/... every work cycle finished in 29 ms
+# at $0 and the orchestrator recorded `success`. The run does nothing, costs
+# nothing, and reports that it worked, which is the worst of the three.
+#
+# Warned rather than refused, and never rewritten. `DATA_DIR` is the one
+# variable that refuses a boot; everything else here warns, and an operator's
+# settings.json is theirs — silently stripping hooks from it would be this
+# container editing the host's configuration to suit itself. The check is a
+# heuristic on purpose: it reports absolute paths a hook names that are not
+# present here, which is the whole failure and cannot produce a false alarm
+# about a hook that would have run.
+warn_unrunnable_hooks() {
+  settings="$CLAUDE_HOME_DIR/settings.json"
+  [ -r "$settings" ] || return 0
+  missing=$(node -e '
+    const fs = require("fs");
+    let s;
+    try { s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(0); }
+    const out = new Set();
+    const walk = (node) => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (!node || typeof node !== "object") return;
+      if (typeof node.command === "string") {
+        for (const tok of node.command.split(/\s+/)) {
+          if (tok.startsWith("/") && !fs.existsSync(tok)) out.add(tok);
+        }
+      }
+      Object.values(node).forEach(walk);
+    };
+    walk(s.hooks ?? {});
+    if (out.size) process.stdout.write([...out].join(" "));
+  ' "$settings" 2>/dev/null) || return 0
+  [ -n "$missing" ] || return 0
+  echo "[usagefoundry] WARNING: $settings configures hooks whose commands are" \
+       "not present in this container: $missing. The CLI runs a hook by" \
+       "absolute path and BLOCKS THE PROMPT when one fails, so every work" \
+       "cycle will finish in milliseconds at \$0 while this app records it as" \
+       "success. Mount a settings.json without those hooks, or make the paths" \
+       "resolve inside the container. Nothing here was changed: the file is" \
+       "yours and is as you left it." >&2
+}
+warn_unrunnable_hooks
+
 exec "$@"
