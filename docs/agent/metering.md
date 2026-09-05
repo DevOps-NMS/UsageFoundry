@@ -287,3 +287,27 @@ money**. Both scripts stopped at eight of twelve modules in every single run;
 the engine finished twelve in every single run. What separates them is not the
 per-token price of anything - it is that the cycle contract keeps going until
 the work is done, and the loop is what makes that cheap rather than expensive.
+
+
+**What could not be compared, and why that is a fact rather than a caveat.**
+The arms above are the two things a person does instead of using this app: a
+`claude -p` loop, and the same loop written competently with `--continue`. They
+are not the whole field - aider, OpenHands and the rest exist - and none of
+them was measured here. The reason is structural rather than editorial.
+
+This install authenticates with a **subscription OAuth credential**
+(`claudeAiOauth`: an access token, a refresh token and a `subscriptionType`).
+There is no `ANTHROPIC_API_KEY` and no admin key. Every third-party harness
+authenticates with an API key, which is a different billing rail and a separate
+commercial relationship. So the comparison space reachable from a subscription
+install is exactly the tools built on the Claude Code CLI - which is the space
+measured above, and measured completely.
+
+That boundary is worth stating in a metering document because it is the same
+boundary an operator of this app is standing behind. An install running on a
+Max subscription cannot benchmark itself against an API-key tool without
+opening an API account, and the figures here are therefore about **what this
+app costs against the alternatives available to the same credential**, not
+about the field. Anyone wanting the wider comparison needs an API key, a second
+budget, and a protocol that prices two billing models against each other -
+which is a study, not a paragraph.
