@@ -142,3 +142,22 @@ list is a per-run bill: `agents.ts` gives an agent a role, and the tools that
 ride with it are re-cached at 2.0x every time it starts. A leaner tool set is
 not a tidiness preference; it is the cheapest lever in this file, because it is
 paid on every run whether the run uses those tools or not.
+
+
+**And what all of that is worth, against the alternative.** A cost figure means
+nothing without something to compare it to, so: the same task, the same
+twelve-file corpus, the same four cycles, run once through this engine and once
+through the thing it replaces - a scripted `claude -p` loop that starts a fresh
+session each cycle. Both priced by the model's own reported cost.
+
+| | cost | done | per module |
+|---|---:|---:|---:|
+| naive `claude -p`, fresh each cycle | $1.1090 | 8 / 12 | $0.1386 |
+| this engine, resume + intake filter | $0.5380 | **12 / 12** | **$0.0448** |
+
+**3.09x cheaper per unit of work**, and it finished the job the naive loop did
+not. The mechanism is the one the rest of this section measures: resume pays
+the cold start once rather than four times, and the filter kept 15,986 bytes
+off the wire on that run. One run per arm, one task, one corpus - a reading
+rather than a rate, and the honest way to read it is that the design choices
+already in this app are what the gap is made of.
