@@ -105,3 +105,19 @@ winnow reaches from its own corpus - its intake filter is worth more than its
 pruner and is positive in every session rather than 58% of them - and on this
 install `WINNOW_FILTER` is blank by default, so the mechanism that avoids the
 dearer term is the one an operator has to go and find.
+
+
+**And the lever, priced.** MEASURED on a corpus whose tool results are large
+enough for the rules to fire - 12 files of ~8.4 KB, 8 work cycles, $1.2497 -
+with `WINNOW_FILTER=1`: 24 filtered requests, 264 tool results seen, **12,096
+bytes kept off the wire**, 0 requests inflated. Priced with the table in
+`pricing.ts`: the avoided cache **write** is $0.0302, deterministic and paid
+once per token; the avoided **reads** are $0.0174, summed per event over the
+requests that followed it. The run would have cost $1.2973, so the saving is
+**3.67%** - against winnow's independently derived +3.76%, reached on a
+different install with a different method, agreeing to within 0.09 points.
+
+The write term needs no assumptions and is the floor: **2.3% of the run**. The
+read term models each kept-out byte as read on every later request, which is an
+upper bound. `bytes / 4` is SPEC 6's token estimate and is flagged wherever it
+is used. One run, so this is a reading rather than a rate.
